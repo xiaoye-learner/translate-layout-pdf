@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unicodedata
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +15,7 @@ import pymupdf as fitz
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from layoutpdf.contracts import Failure, check_translation, digest, read, seal, validate, write
 from layoutpdf.extract import prepare
+from layoutpdf.fonts import load_document_font
 from layoutpdf.layout import Typesetter, cjk_orphan_paragraphs
 from layoutpdf.pipeline import build, correct, current, deliver, merge, review
 import layoutpdf.extract as extract_module
@@ -40,6 +42,11 @@ TRANSLATIONS = {
     "A second": "这是第二个短段落。",
     "A separate": "这是右栏的独立段落。",
 }
+
+
+def canonical_text(value):
+    """Normalize compatibility mappings emitted by some subset CJK fonts."""
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", value))
 
 
 def translate_document(doc):
@@ -124,7 +131,7 @@ class PipelineTests(unittest.TestCase):
         p = next(p for p in self.doc["paragraphs"] if p["source"] == "A short paragraph.")
         with fitz.open(self.build_dir / "translated.pdf") as pdf:
             spans = [s for b in pdf[0].get_text("dict")["blocks"] if b["type"] == 0 for l in b["lines"] for s in l["spans"]]
-            span = next(s for s in spans if "这是一个短段落" in s["text"])
+            span = next(s for s in spans if "这是一个短段落" in canonical_text(s["text"]))
             self.assertAlmostEqual(span["origin"][0] - p["bbox"][0], 2 * span["size"], delta=.2)
 
     def test_cjk_body_uses_explicit_extra_leading(self):
@@ -132,14 +139,22 @@ class PipelineTests(unittest.TestCase):
         items = [x for x in self.plan["placements"] if x["paragraph"] == p["id"] and x["kind"] == "text"]
         baselines = sorted({round(x["baseline"], 6) for x in items})
         self.assertGreaterEqual(len(baselines), 2)
-        expected = items[0]["size"] * self.doc["styles"][p["style_id"]]["leading"] * 1.06
+        font = load_document_font(self.doc["fonts"][items[0]["font"]])
+        size = items[0]["size"]
+        requested = size * self.doc["styles"][p["style_id"]]["leading"] * 1.06
+        expected = max(size * (font.ascender - font.descender), requested)
         self.assertAlmostEqual(baselines[1] - baselines[0], expected, delta=.02)
         self.assertEqual(self.plan["cjk_body_leading"], 1.06)
+
+    def test_collection_font_uses_target_language_face(self):
+        for metadata in self.doc["fonts"].values():
+            if Path(metadata["path"]).suffix.lower() in {".ttc", ".otc"} and "NotoSansCJK" in metadata["path"]:
+                self.assertIn("CJKsc", metadata.get("font_name", ""))
 
     def test_headings_use_same_real_bold_face(self):
         with fitz.open(self.build_dir / "translated.pdf") as pdf:
             headings = [s for page in pdf for b in page.get_text("dict")["blocks"] if b["type"] == 0
-                        for line in b["lines"] for s in line["spans"] if any(t in re.sub(r"\s+", "", s["text"]) for t in ("1.引言", "2.结论", "3.更多结果"))]
+                        for line in b["lines"] for s in line["spans"] if any(t in canonical_text(s["text"]) for t in ("1.引言", "2.结论", "3.更多结果"))]
             self.assertEqual(len(headings), 3)
             self.assertEqual(len({round(s["size"], 2) for s in headings}), 1)
             self.assertTrue(all("bold" in s["font"].lower() for s in headings))

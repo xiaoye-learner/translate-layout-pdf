@@ -18,6 +18,7 @@ The image is generated entirely by `tests/make_fixture.py` and contains no third
 - Uses relative overlap fractions for formula/prose collision decisions, tolerating tiny glyph-edge contact while retaining genuinely ambiguous source regions for review.
 - Applies a two-em first-line indent to new Chinese and Japanese body paragraphs, excluding continuations.
 - Uses consistent style-wide scaling and real bold fonts; CJK body expansion is capped at `1.20×`, while title and heading expansion is capped at `1.50×`.
+- Selects the target-language face inside Linux TTC/OTC collections, so Simplified Chinese does not silently use Japanese glyph variants.
 - Adds a small explicit leading increase for CJK body text; constrained short or formula frames use audited local fallback, and one-character final lines are rebalanced within the paragraph.
 - Protects images, detected tables, standalone formulas, headers, footers, and other non-translatable regions.
 - Validates schemas, hashes, source coverage, fonts, assets, token order, geometry, and final PDF structure.
@@ -70,7 +71,7 @@ python -m unittest discover -s tests -v
 python tests/run_sample.py ./sample-output
 ```
 
-Tests generate their own synthetic PDFs and do not require third-party papers. The current 33-test suite includes mixed formula/prose lines, overlapping formula fragments, tiny edge-contact tolerance, inline scripts and fractions, display equations, CJK indentation and leading, heading consistency, continuation flows, protected tables, review gates, and artifact tamper detection.
+Tests generate their own synthetic PDFs and do not require third-party papers. The current 34-test suite includes mixed formula/prose lines, overlapping formula fragments, tiny edge-contact tolerance, target-language collection-face selection, inline scripts and fractions, display equations, CJK indentation and leading, heading consistency, continuation flows, protected tables, review gates, and artifact tamper detection.
 
 ## Limitations
 

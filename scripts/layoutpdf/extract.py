@@ -9,7 +9,7 @@ from pathlib import Path
 import pymupdf as fitz
 
 from .contracts import Failure, digest, issue, seal, write
-from .fonts import annotate_ink
+from .fonts import annotate_ink, collection_face, load_document_font
 
 MATH_FONT = re.compile(r"CMMI|CMSY|CMEX|MSAM|MSBM|math|symbol|STIX.*(?:Italic|Symbols)", re.I)
 MATH_SYMBOLS = set("=+−×÷±≤≥≠≈∑∫√∂∇∞∈∉⊂⊆∪∩→↦∀∃∏∝⊗⊕′″ˆ")
@@ -53,18 +53,23 @@ def trim_erase_edges(rects, preserved, threshold=.05):
     return trimmed
 
 
-def font_pair(regular=None, bold=None):
+def font_pair(regular=None, bold=None, target_language="zh-CN"):
     pairs = [(regular, bold)] if regular or bold else [
         ("C:/Windows/Fonts/Deng.ttf", "C:/Windows/Fonts/Dengb.ttf"),
         ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
         ("C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/msyhbd.ttc")]
     for r, b in pairs:
         if r and b and Path(r).is_file() and Path(b).is_file():
-            # Both faces must load before any PDF is changed.
-            fitz.Font(fontfile=r)
-            fitz.Font(fontfile=b)
-            return {key: {"path": str(Path(p).resolve()), "sha256": digest(p)}
-                    for key, p in [("regular", r), ("bold", b)]}
+            fonts = {}
+            for key, path in (("regular", r), ("bold", b)):
+                metadata = {"path": str(Path(path).resolve()), "sha256": digest(path)}
+                selected = collection_face(path, target_language)
+                if selected:
+                    metadata.update(collection_index=selected[0], font_name=selected[1])
+                # The selected face, rather than merely the collection default, must load.
+                load_document_font(metadata)
+                fonts[key] = metadata
+            return fonts
     raise Failure([issue("font/pair-unavailable", "fonts", {},
                          ["supply --font and --bold-font with a static CJK font pair"], stage="prepare")])
 
@@ -364,7 +369,7 @@ def prepare(source, job, target_language="zh-CN", regular=None, bold=None):
     job = Path(job).resolve()
     if job.exists():
         raise Failure([issue("job/already-exists", str(job), {}, ["resume this job or use a new job directory"], stage="prepare")])
-    fonts = font_pair(regular, bold)
+    fonts = font_pair(regular, bold, target_language)
     pdf = fitz.open(source)
     if pdf.needs_pass:
         raise Failure([issue("input/encrypted", str(source), {}, ["provide an unlocked PDF"], stage="prepare")])

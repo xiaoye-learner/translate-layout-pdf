@@ -73,6 +73,14 @@
           },
           "sha256": {
             "$ref": "#/$defs/hash"
+          },
+          "collection_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "font_name": {
+            "type": "string",
+            "minLength": 1
           }
         }
       }

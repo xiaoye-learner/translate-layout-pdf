@@ -6,6 +6,7 @@ from pathlib import Path
 import pymupdf as fitz
 
 from .contracts import TOKEN, issue
+from .fonts import load_document_font
 
 ALPHABET = r"A-Za-z0-9\u00c0-\u02ff\u0370-\u052f"
 WORDS = re.compile(rf"[{ALPHABET}]+(?:[.'’_-][{ALPHABET}]+)*|\s+|.", re.S)
@@ -41,7 +42,7 @@ class Typesetter:
     def __init__(self, document, preflight=False):
         self.doc = document
         self.preflight = preflight
-        self.fonts = {k: fitz.Font(fontfile=v["path"]) for k, v in document["fonts"].items()}
+        self.fonts = {k: load_document_font(v) for k, v in document["fonts"].items()}
 
     def units(self, paragraph):
         text = paragraph["translation"]

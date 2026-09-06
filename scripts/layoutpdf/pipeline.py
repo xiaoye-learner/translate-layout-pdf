@@ -10,6 +10,7 @@ import pymupdf as fitz
 from PIL import Image, ImageChops
 
 from .contracts import Failure, check_translation, digest, engine_digest, issue, object_digest, read, require, seal, validate, write
+from .fonts import register_document_font
 from .layout import Typesetter
 
 
@@ -160,7 +161,7 @@ def build(job, preflight=False):
                 if not any(link.get("uri") == other.get("uri") and link.get("from") == other.get("from") for other in current_links):
                     page.insert_link({k: v for k, v in link.items() if k not in {"xref", "id"}})
             for key, font in doc["fonts"].items():
-                page.insert_font(fontname="lp" + key, fontfile=font["path"])
+                register_document_font(page, "lp" + key, font)
             # Consecutive text units are coalesced per baseline to preserve searchable text.
             items = [item for item in plan["placements"] if item["page"] == page_index]
             i = 0

@@ -1,11 +1,82 @@
 """Source ink bounds, including embedded Type 1 fonts with font-wide MuPDF bounds."""
+from functools import lru_cache
+from io import BytesIO
 from pathlib import Path
+import re
 import tempfile
 
 import pymupdf as fitz
 from fontTools.agl import toUnicode
 from fontTools.pens.boundsPen import BoundsPen
 from fontTools.t1Lib import T1Font
+from fontTools.ttLib import TTCollection
+
+
+COLLECTION_REGIONS = {
+    "zh-cn": ("SC",),
+    "zh-sg": ("SC",),
+    "zh-hans": ("SC",),
+    "zh-tw": ("TC",),
+    "zh-hant": ("TC",),
+    "zh-hk": ("HK", "TC"),
+    "zh-mo": ("HK", "TC"),
+    "ja": ("JP",),
+    "ko": ("KR",),
+}
+
+
+def collection_face(path, target_language):
+    """Return the target-language face in a TTC/OTC instead of its first face."""
+    path = Path(path)
+    if path.suffix.lower() not in {".ttc", ".otc"} or not target_language:
+        return None
+    language = target_language.lower().replace("_", "-")
+    regions = next((value for key, value in COLLECTION_REGIONS.items()
+                    if language == key or language.startswith(key + "-")), ())
+    if not regions:
+        return None
+    collection = TTCollection(str(path), lazy=True)
+    try:
+        names = [(index, font["name"].getDebugName(6) or font["name"].getDebugName(1) or "")
+                 for index, font in enumerate(collection.fonts)]
+        for region in regions:
+            match = next(((index, name) for index, name in names
+                          if re.search(rf"CJK{region}(?:-|$)", name, re.I)), None)
+            if match:
+                return match
+    finally:
+        collection.close()
+    return None
+
+
+@lru_cache(maxsize=8)
+def _collection_buffer(path, index, sha256):
+    """Extract one collection face in memory; the source hash keys the cache."""
+    collection = TTCollection(path, lazy=False)
+    try:
+        output = BytesIO()
+        collection.fonts[index].save(output, reorderTables=False)
+        return output.getvalue()
+    finally:
+        collection.close()
+
+
+def font_buffer(metadata):
+    if "collection_index" not in metadata:
+        return None
+    return _collection_buffer(metadata["path"], metadata["collection_index"], metadata["sha256"])
+
+
+def load_document_font(metadata):
+    buffer = font_buffer(metadata)
+    return fitz.Font(fontbuffer=buffer) if buffer is not None else fitz.Font(fontfile=metadata["path"])
+
+
+def register_document_font(page, fontname, metadata):
+    buffer = font_buffer(metadata)
+    if buffer is not None:
+        return page.insert_font(fontname=fontname, fontbuffer=buffer)
+    return page.insert_font(fontname=fontname, fontfile=metadata["path"])
 
 
 def type1_metrics(buffer):

@@ -4,6 +4,9 @@ All notable changes to this project will be documented here.
 
 ## Unreleased
 
+- Selected the target-language face inside TTC/OTC collections, preventing Ubuntu Noto CJK from silently using Japanese glyph variants for Simplified Chinese output.
+- Made CJK leading verification account for a font's minimum safe glyph height across platforms.
+- Updated GitHub Actions to the current Node 24-based checkout and Python setup actions.
 - Split mixed formula/prose lines so natural-language text remains translatable while source mathematics stays vector-preserved and inline.
 - Added containment-based absorption of overlapping numeric and script fragments into their formula assets.
 - Merged overlapping same-flow semantic fragments across formula boundaries, with safeguards that keep standalone display equations separate.
@@ -13,7 +16,7 @@ All notable changes to this project will be documented here.
 - Added bounded body expansion with audited local fallback for constrained short and formula-only frames.
 - Added a 6% CJK body leading increase and recorded it in the layout plan.
 - Improved conservative handling of ambiguous formulas, borderless tables, figure regions, run-in headings, and source preflight.
-- Expanded the automated regression suite to 33 tests.
+- Expanded the automated regression suite to 34 tests.
 
 ## 5.0.0 - 2026-09-05
 
