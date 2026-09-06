@@ -1,0 +1,4 @@
+PyMuPDF>=1.26.5,<1.27
+Pillow>=11.1,<12
+fonttools>=4.55,<5
+jsonschema>=4.23,<5
