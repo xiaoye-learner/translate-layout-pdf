@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from pathlib import Path
 
 import pymupdf as fitz
 
 from .contracts import TOKEN, issue
 from .fonts import load_document_font
+from .balance import balance_columns
 
 ALPHABET = r"A-Za-z0-9\u00c0-\u02ff\u0370-\u052f"
 WORDS = re.compile(rf"[{ALPHABET}]+(?:[.'’_-][{ALPHABET}]+)*|\s+|.", re.S)
@@ -39,9 +41,10 @@ def cjk_orphan_paragraphs(items):
 
 
 class Typesetter:
-    def __init__(self, document, preflight=False):
+    def __init__(self, document, preflight=False, layout_mode="balanced"):
         self.doc = document
         self.preflight = preflight
+        self.layout_mode = layout_mode
         self.fonts = {k: load_document_font(v) for k, v in document["fonts"].items()}
 
     def units(self, paragraph):
@@ -83,6 +86,17 @@ class Typesetter:
                 bound[-1]["text"] += unit["text"]
             else:
                 bound.append(dict(unit))
+        for i, unit in enumerate(bound):
+            j = i + 1
+            while j < len(bound) and bound[j]["kind"] == "text" and bound[j]["text"].isspace():
+                j += 1
+            if j >= len(bound) or bound[j]["kind"] != "math":
+                continue
+            latin = unit["kind"] == "text" and bool(re.fullmatch(rf"[{ALPHABET}]+", unit["text"]))
+            inline = unit["kind"] == "math" and self.doc["assets"][unit["asset"]]["placement"] == "inline"
+            if (latin or inline) and self.doc["assets"][bound[j]["asset"]]["placement"] == "inline":
+                for member in bound[i:j]:
+                    member["keep_with_next"] = True
         return bound
 
     def place(self, paragraph, factor=1.0, input_units=None, continuation=None):
@@ -122,7 +136,14 @@ class Typesetter:
                          ascent=font.ascender * size, descent=-font.descender * size)
             if not current and u["kind"] == "text" and u["text"] == " ":
                 continue
-            if width + u["width"] > box.width + .01 and current:
+            required_width = u["width"]
+            cursor = index
+            while units[cursor].get("keep_with_next") and cursor + 1 < len(units):
+                cursor += 1
+                following = units[cursor]
+                required_width += (self.doc["assets"][following["asset"]]["width"] * factor
+                                   if following["kind"] == "math" else font.text_length(following["text"], fontsize=size))
+            if width + required_width > box.width + .01 and current and not current[-1].get("keep_with_next"):
                 # Move the preceding unit with closing punctuation, rather than starting a line with it.
                 if u["kind"] == "text" and u["text"] in CLOSING and len(current) > 1:
                     tail = current.pop()
@@ -194,6 +215,32 @@ class Typesetter:
         groups = {}
         for p in self.doc["paragraphs"]:
             groups.setdefault(p["flow_id"], []).append(p)
+        segmented = {}
+        for key, group in groups.items():
+            part = 0
+            previous = None
+            for p in group:
+                if previous and previous["page"] == p["page"]:
+                    prior_bottom = max(rect[3] for rect in previous["erase"])
+                    source_top = min(rect[1] for rect in p["erase"])
+                    if any(r["page"] == p["page"] and r["reason"] == "formula-or-numeric"
+                           and r["bbox"][1] >= prior_bottom - .1 and r["bbox"][3] <= source_top + .1
+                           and min(r["bbox"][2], p["bbox"][2], previous["bbox"][2])
+                               > max(r["bbox"][0], p["bbox"][0], previous["bbox"][0])
+                           for r in self.doc["preserved"]):
+                        # Keep semantic text on its own side of a fixed display
+                        # equation; proportional flow splitting can move a
+                        # citation or colon into the following explanation.
+                        part += 1
+                segmented.setdefault((key, part), []).append(p)
+                previous = p
+        groups = segmented
+        retained = {p["id"] for group in groups.values()
+                    if not self.preflight and all(p["translation"] == p["source"] for p in group)
+                    for p in group}
+        groups = {key: group for key, group in groups.items() if group[0]["id"] not in retained}
+        retained_boxes = [(p["page"], p["id"], rect) for p in self.doc["paragraphs"]
+                          if p["id"] in retained for rect in p["erase"]]
         style_factors = {s: 1.0 for s in self.doc["styles"]}
         paragraph_scales = {}
 
@@ -349,6 +396,9 @@ class Typesetter:
                 blockers = [r for r in self.doc["preserved"] if r["page"] == p["page"]
                             and r["bbox"][3] >= prior_bottom and r["bbox"][1] <= source_top
                             and min(r["bbox"][2], p["bbox"][2]) > max(r["bbox"][0], p["bbox"][0])]
+                blockers += [rect for page, _, rect in retained_boxes if page == p["page"]
+                             and rect[3] >= prior_bottom and rect[1] <= source_top
+                             and min(rect[2], p["bbox"][2]) > max(rect[0], p["bbox"][0])]
                 if source_gap < size * 3 and not blockers:
                     gap = max(size * (.55 if p["role"] in {"title", "heading", "subheading"} else .3), min(source_gap, size))
                     destination = max(x["bbox"][3] for x in by_paragraph[q["id"]]) + gap
@@ -360,6 +410,10 @@ class Typesetter:
                             item["bbox"][3] += delta
                             item["baseline"] += delta
             previous.append(p)
+        # Balance whole source column regions instead of leaving contraction
+        # inside independently anchored paragraph boxes.
+        regions = (balance_columns(self.doc, placements) if not self.preflight and self.layout_mode == "balanced"
+                   and self.doc["target_language"].startswith(("zh", "ja")) else [])
         # Validate actual geometry, not ink-density proxies.
         for item in placements:
             bounds = self.doc["pages"][item["page"]]
@@ -369,16 +423,27 @@ class Typesetter:
             for preserved in self.doc["preserved"]:
                 if preserved["page"] == item["page"] and overlap_fraction(r, preserved["bbox"]) >= .05:
                     diagnostics.append(issue("layout/preserved-overlap", item["paragraph"], {"bbox": preserved["bbox"]}, stage="layout"))
-        for i, item in enumerate(placements):
-            if item["kind"] == "text" and item["text"].isspace():
-                continue
-            for other in placements[i + 1:]:
-                if item["page"] != other["page"] or item["paragraph"] == other["paragraph"]:
-                    continue
-                overlap = fitz.Rect(item["bbox"]) & fitz.Rect(other["bbox"])
-                if overlap.width * overlap.height > .5:
-                    diagnostics.append(issue("layout/paragraph-overlap", item["paragraph"], {"other": other["paragraph"]}, stage="layout"))
-                    break
+            for page, pid, rect in retained_boxes:
+                if page == item["page"] and overlap_fraction(r, rect) >= .05:
+                    diagnostics.append(issue("layout/retained-overlap", item["paragraph"], {"other": pid}, stage="layout"))
+        # Sweep only vertically overlapping items on the same page. Scanning
+        # every glyph against every later glyph made whole-paper builds slow.
+        by_page = defaultdict(list)
+        for item in placements:
+            if item["kind"] != "text" or not item["text"].isspace():
+                by_page[item["page"]].append(item)
+        for page_items in by_page.values():
+            active = []
+            for item in sorted(page_items, key=lambda item: (item["bbox"][1], item["bbox"][0])):
+                active = [other for other in active if other["bbox"][3] > item["bbox"][1]]
+                for other in active:
+                    if item["paragraph"] == other["paragraph"]:
+                        continue
+                    overlap = fitz.Rect(item["bbox"]) & fitz.Rect(other["bbox"])
+                    if overlap.width * overlap.height > .5:
+                        diagnostics.append(issue("layout/paragraph-overlap", item["paragraph"], {"other": other["paragraph"]}, stage="layout"))
+                        break
+                active.append(item)
         # Font availability is checked against actual translated characters.
         missing = set()
         for item in placements:
@@ -389,6 +454,9 @@ class Typesetter:
         if missing:
             diagnostics.append(issue("font/missing-glyph", "fonts", {"characters": sorted(missing)}, stage="layout"))
         return dict(schema="layout-plan/v1", styles=style_factors, paragraph_scales=paragraph_scales,
+                    layout_mode=self.layout_mode,
                     cjk_body_leading=1.06 if not self.preflight and self.doc["target_language"].startswith(("zh", "ja")) else 1.0,
                     vertical_shifts=compacted,
+                    column_regions=regions,
+                    retained_paragraphs=sorted(retained),
                     placements=placements, diagnostics=diagnostics)

@@ -14,7 +14,23 @@ Check these reported problem classes directly:
 - headings of the same style have the same size and a visibly bold face;
 - text contraction does not leave avoidable paragraph-sized holes, and expansion does not clip or overlap.
 
+For abrupt whitespace, inspect `layout.json/column_regions` and preserved-region diagnostics before changing prose. `distributed_height` reports bounded spacing added to a clear column region; `remaining_tail` is space that would require excessive spacing or a different page-flow policy to fill. A retained English paragraph with `parse/formula-preserved` is a parsing problem. Inspect `parse/formula-vector-mask` crops at 144 DPI to confirm every source formula stroke is intact. Unchanged flows are listed in `retained_paragraphs` and must retain source ink and links. Formula boundaries must not carry citations or sentence endings to the wrong side. Use `build --layout-mode source` when source-oriented vertical correspondence takes priority over balanced reading.
+
 Record concrete review notes, for example: `2 pages inspected at 72/144 DPI; both inline assets share their prose baselines; three H1 headings use the same bold face; no overlap or clipping.` Generic notes such as `looks good` do not provide useful evidence.
+
+## Heading spacing
+
+In balanced CJK layout, headings following prose use the following space before their first line, measured in the heading's font size:
+
+| Boundary | Preferred base | Maximum with spare height |
+| --- | ---: | ---: |
+| Prose to section heading | 1.00em | 1.50em |
+| Prose to subsection heading | 0.75em | 1.10em |
+| Consecutive section/subsection headings | 0.55em | 0.55em |
+
+Heading expansion takes priority over extra body leading. A heading at the start of a page does not receive a new top gap. At a region boundary after a fixed object, existing source spacing counts toward the preferred gap; already larger source gaps are not expanded. In a dense region, the preferred extra heading gap may fall back toward 0.55em to retain fit before any additional spacing is distributed. Fixed objects and page bounds remain unchanged.
+
+Inspect `column_regions/heading_spacing` for the measured `before_gap` and `before_em`. Confirm visually that headings have a clear break from preceding prose, remain connected to their following text, and that consecutive heading levels remain a group.
 
 ## Repair boundary
 

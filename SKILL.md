@@ -12,6 +12,12 @@ The v5 engine treats semantic text and page geometry separately. It stores inlin
 
 ## Run
 
+Use the default `balanced` layout for readable translations: paragraphs flow within source column regions bounded by fixed objects, and spare height is shared through bounded line/paragraph spacing. If the user prioritizes source vertical placement, pass `build --layout-mode source`. Do not stretch content to fill intentionally empty source areas or move content across fixed objects/pages just to hide whitespace.
+
+Reserve space before section headings by level before expanding body leading. Keep consecutive heading groups compact and adapt added spacing to the region's available height; see [references/quality-and-repair.md](references/quality-and-repair.md) for the bounded typography policy.
+
+Explicitly unchanged flows retain the original PDF text, typography, formulas, and links; they still receive source-ink checks. Text on opposite sides of a fixed display equation is laid out separately so proportional continuation splitting cannot move a citation or sentence ending across the equation. Source reconstruction preflight always re-typesets text rather than using unchanged-flow retention.
+
 1. Run `python scripts/layout_pdf.py doctor`. The runtime needs Python 3.10+, `pymupdf>=1.26.5,<1.27`, Pillow, jsonschema, and fontTools. If `doctor` fails because a package is missing, install only these dependencies in the active workspace runtime.
 2. Prepare the job:
 
@@ -22,7 +28,7 @@ The v5 engine treats semantic text and page geometry separately. It stores inlin
 
    `python scripts/layout_pdf.py build JOB --preflight`
 
-   Inspect its rendered result using the same review process as a translation. Correct a demonstrated role, continuation, or formula-placement error with `correct`; do not hand-edit geometry or hashes.
+   Inspect its rendered result using the same review process as a translation. Inspect every `parse/formula-vector-mask` region against the source strokes at 144 DPI: the mask may exclude a neighboring glyph only when its ink is disjoint from the formula. Correct a demonstrated role, continuation, or formula-placement error with `correct`; do not hand-edit geometry or hashes.
 4. Read [references/translation-contract.md](references/translation-contract.md). Translate every batch entry with Codex and write a UTF-8 JSON object from paragraph ID to translated string. Merge complete or partial batches atomically:
 
    `python scripts/layout_pdf.py merge JOB BATCH.json`
@@ -51,7 +57,7 @@ The v5 engine treats semantic text and page geometry separately. It stores inlin
 ## Invariants
 
 - Preserve each `[[Mdddd]]` and `[[Pdddd]]` token byte-for-byte, in the original order, exactly once. Keep every translation to one semantic paragraph without manual line breaks.
-- Leave source formulas as vectors. Never replace subscripts, superscripts, fraction bars, or symbols with flattened text. An inline formula stays in its prose baseline; a display formula stays a display object.
+- Leave source formulas as vectors. Never replace subscripts, superscripts, fraction bars, or symbols with flattened text. Latin symbol labels and consecutive inline assets stay together at wrap boundaries. An inline formula stays in its prose baseline; a display formula stays a display object.
 - New Chinese or Japanese body paragraphs receive a two-em indent. Headings, continuations, captions, footnotes, and lists do not. Keep headings concise; the engine keeps a shared size and real bold face for each heading style.
 - Treat diagnostics as evidence. Do not weaken validation thresholds, edit sealed geometry, or repeatedly shorten prose to conceal a parsing error.
 - Retain failed jobs for recovery. Stop after two correction/rebuild attempts with the same failure fingerprint and report the concrete limitation.

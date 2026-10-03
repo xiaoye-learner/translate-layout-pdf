@@ -123,14 +123,17 @@ def compose_dual(source, mono, path):
     dual.close()
 
 
-def build(job, preflight=False):
+def build(job, preflight=False, layout_mode="balanced"):
     job, doc = load_job(job, translated=not preflight)
     require(doc["diagnostics"])
     snapshot_hash = digest(job / "document.json")
     if preflight:
         for p in doc["paragraphs"]:
             p["translation"] = p["source"]
-    plan = Typesetter(doc, preflight=preflight).compile()
+    plan = Typesetter(doc, preflight=preflight, layout_mode=layout_mode).compile()
+    retained = set(plan["retained_paragraphs"])
+    retained_assets = {token["asset"] for p in doc["paragraphs"] if p["id"] in retained
+                       for token in p["tokens"].values() if token["kind"] == "math"}
     errors = list(plan["diagnostics"])
     build_dir = Path(tempfile.mkdtemp(prefix="build-", dir=job))
     write(build_dir / "document.json", doc)
@@ -144,13 +147,13 @@ def build(job, preflight=False):
             original_links = source[page_index].get_links()
             erased = []
             for p in doc["paragraphs"]:
-                if p["page"] == page_index:
+                if p["page"] == page_index and p["id"] not in retained:
                     for rect in p["erase"]:
                         erased.append(fitz.Rect(rect))
                         page.add_redact_annot(rect, fill=False, cross_out=False)
             page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=fitz.PDF_REDACT_LINE_ART_NONE)
-            for a in doc["assets"].values():
-                if a["page"] == page_index:
+            for aid, a in doc["assets"].items():
+                if a["page"] == page_index and aid not in retained_assets:
                     page.add_redact_annot(a["bbox"], fill=False, cross_out=False)
             page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED)
             page = mono.reload_page(page)
@@ -205,10 +208,23 @@ def build(job, preflight=False):
                 if diff > .08:
                     errors.append(issue("formula/render-mismatch", item["asset"], {"difference": diff, "bbox": item["bbox"]},
                                         ["inspect the formula source and target crops"], stage="artifact"))
+        for aid in sorted(retained_assets):
+            a = doc["assets"][aid]
+            diff = difference(raster(source[a["page"]], a["bbox"]), raster(mono[a["page"]], a["bbox"]))
+            formula_checks.append(dict(asset=aid, page=a["page"] + 1, bbox=a["bbox"], difference=diff))
+            if diff > .08:
+                errors.append(issue("formula/render-mismatch", aid, {"difference": diff}, stage="artifact"))
         for r in doc["preserved"]:
             diff = difference(raster(source[r["page"]], r["bbox"]), raster(mono[r["page"]], r["bbox"]))
             if diff > .02:
                 errors.append(issue("artifact/preserved-changed", r, {"difference": diff}, stage="artifact"))
+        for p in doc["paragraphs"]:
+            if p["id"] not in retained:
+                continue
+            for rect in p["erase"]:
+                diff = difference(raster(source[p["page"]], rect), raster(mono[p["page"]], rect))
+                if diff > .02:
+                    errors.append(issue("artifact/retained-changed", p["id"], {"difference": diff}, stage="artifact"))
         dual_path = build_dir / "bilingual.pdf"
         compose_dual(source, mono, dual_path)
         with fitz.open(dual_path) as dual:

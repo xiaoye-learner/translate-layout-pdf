@@ -16,6 +16,10 @@ The image is generated entirely by `tests/make_fixture.py` and contains no third
 - Flows inline formulas with prose while retaining display equations as standalone objects.
 - Separates mathematics from prose on mixed lines, absorbs overlapping script/number fragments into the formula asset, and rejoins prose split across formulas into one semantic paragraph. This prevents formula-dense sentences from being skipped or leaving isolated blank areas.
 - Uses relative overlap fractions for formula/prose collision decisions, tolerating tiny glyph-edge contact while retaining genuinely ambiguous source regions for review.
+- Uses vector clipping when a neighboring line enters an empty corner of a formula crop, without removing any intended formula ink.
+- Packs translated paragraphs within clear source column regions and distributes spare height through bounded leading and paragraph spacing. `build --layout-mode source` retains the earlier source-oriented vertical positioning.
+- Reserves level-specific space before headings and gives heading expansion priority over extra body leading, keeping consecutive heading levels together and respecting dense-region limits.
+- Keeps explicitly unchanged paragraph flows in the source PDF, including their original typography and links.
 - Applies a two-em first-line indent to new Chinese and Japanese body paragraphs, excluding continuations.
 - Uses consistent style-wide scaling and real bold fonts; CJK body expansion is capped at `1.20×`, while title and heading expansion is capped at `1.50×`.
 - Selects the target-language face inside Linux TTC/OTC collections, so Simplified Chinese does not silently use Japanese glyph variants.
@@ -71,7 +75,7 @@ python -m unittest discover -s tests -v
 python tests/run_sample.py ./sample-output
 ```
 
-Tests generate their own synthetic PDFs and do not require third-party papers. The current 34-test suite includes mixed formula/prose lines, overlapping formula fragments, tiny edge-contact tolerance, target-language collection-face selection, inline scripts and fractions, display equations, CJK indentation and leading, heading consistency, continuation flows, protected tables, review gates, and artifact tamper detection.
+Tests generate their own synthetic PDFs and do not require third-party papers. The current 40-test suite includes mixed formula/prose lines, overlapping formula fragments, tiny edge-contact tolerance, vector corner masks, column balancing around fixed objects, unchanged source flows, semantic boundaries at display equations, target-language collection-face selection, inline scripts and fractions, display equations, CJK indentation and leading, heading consistency and before-spacing, dense-region spacing fallback, continuation flows, protected tables, review gates, and artifact tamper detection.
 
 ## Limitations
 

@@ -31,6 +31,7 @@ def parser():
             command.add_argument("--translated", action="store_true")
         if name == "build":
             command.add_argument("--preflight", action="store_true")
+            command.add_argument("--layout-mode", choices=["balanced", "source"], default="balanced")
         if name == "review":
             command.add_argument("--status", choices=["passed", "failed"])
             command.add_argument("--notes")
@@ -58,7 +59,7 @@ def main():
         elif args.command in {"merge", "correct"}:
             result = (merge if args.command == "merge" else correct)(args.job, args.batch)
         elif args.command == "build":
-            result = build(args.job, args.preflight)
+            result = build(args.job, args.preflight, args.layout_mode)
         elif args.command == "review":
             result = review(args.job, args.status, args.notes, args.evidence_hash)
         else:

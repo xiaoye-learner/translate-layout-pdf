@@ -90,6 +90,56 @@ class PipelineTests(unittest.TestCase):
         result = build(job, preflight=True)
         self.assertTrue(result["ok"], result["diagnostics"])
 
+    def test_unchanged_paragraph_keeps_source_ink_and_links(self):
+        job = self.root / "retained-job"
+        shutil.copytree(self.job, job)
+        paragraphs = [p for p in self.doc["paragraphs"] if p["source"].startswith(("The value", "Visit"))]
+        batch = self.root / "retained-batch.json"
+        write(batch, {p["id"]: p["source"] for p in paragraphs})
+        merge(job, batch)
+        result = build(job)
+        self.assertTrue(result["ok"], result["diagnostics"])
+        plan = read(Path(result["build"]) / "layout.json")
+        self.assertEqual(set(plan["retained_paragraphs"]), {p["id"] for p in paragraphs})
+        self.assertEqual(len(result["formulas"]), len(self.doc["assets"]))
+        with fitz.open(self.source) as source, fitz.open(Path(result["build"]) / "translated.pdf") as output:
+            for p in paragraphs:
+                for rect in p["erase"]:
+                    options = dict(matrix=fitz.Matrix(2, 2), clip=fitz.Rect(rect), annots=False)
+                    self.assertEqual(source[p["page"]].get_pixmap(**options).samples,
+                                     output[p["page"]].get_pixmap(**options).samples)
+            self.assertTrue({link.get("uri") for page in source for link in page.get_links()}
+                            <= {link.get("uri") for page in output for link in page.get_links()})
+
+    def test_fixed_display_equation_keeps_text_on_its_own_side(self):
+        doc = copy.deepcopy(self.doc)
+        before = next(p for p in doc["paragraphs"] if p["source"].startswith("We define"))
+        after = next(p for p in doc["paragraphs"] if p["source"].startswith("where"))
+        after["flow_id"] = before["flow_id"]
+        after["continuation"] = True
+        plan = Typesetter(doc).compile()
+        self.assertFalse(plan["diagnostics"], plan["diagnostics"])
+        for p in (before, after):
+            text = "".join(item["text"] for item in plan["placements"]
+                           if item["paragraph"] == p["id"] and item["kind"] == "text")
+            self.assertEqual(canonical_text(text), canonical_text(p["translation"]))
+
+    def test_latin_symbol_label_wraps_with_inline_formula(self):
+        doc = copy.deepcopy(self.doc)
+        p = next(p for p in doc["paragraphs"] if p["source"].startswith("The value"))
+        p["translation"] = "测NBT [[M0001]]继续。"
+        asset = doc["assets"][p["tokens"]["[[M0001]]"]["asset"]]
+        font = load_document_font(doc["fonts"]["regular"])
+        size = doc["styles"][p["style_id"]]["size"]
+        p["bbox"] = [0, 0, font.text_length("NBT ", fontsize=size) + asset["width"] + 4, 300]
+        result = Typesetter(doc).place(p, continuation=True)
+        self.assertFalse(result["overflow"])
+        label = next(item for item in result["placements"] if item.get("text") == "NBT")
+        math = next(item for item in result["placements"] if item["kind"] == "math")
+        self.assertEqual(label["line"], math["line"])
+        self.assertGreater(label["line"], 0)
+        self.assertAlmostEqual(label["baseline"], math["baseline"])
+
     def test_inline_scripts_and_fraction_stay_inline(self):
         self.assertEqual(len(self.doc["assets"]), 3)
         self.assertTrue(all(a["placement"] == "inline" for a in self.doc["assets"].values()))
@@ -143,8 +193,92 @@ class PipelineTests(unittest.TestCase):
         size = items[0]["size"]
         requested = size * self.doc["styles"][p["style_id"]]["leading"] * 1.06
         expected = max(size * (font.ascender - font.descender), requested)
-        self.assertAlmostEqual(baselines[1] - baselines[0], expected, delta=.02)
+        self.assertGreaterEqual(baselines[1] - baselines[0], expected - .02)
+        self.assertLessEqual(baselines[1] - baselines[0], expected * 1.30 + .02)
         self.assertEqual(self.plan["cjk_body_leading"], 1.06)
+
+    def test_column_balance_closes_internal_hole_and_respects_fixed_object(self):
+        from layoutpdf.balance import balance_columns
+
+        def paragraph(pid, top, bottom):
+            return dict(id=pid, page=0, role="body", bbox=[10, top, 100, bottom],
+                        erase=[[10, top, 100, bottom]])
+
+        doc = dict(pages=[dict(width=220, height=300)],
+                   paragraphs=[paragraph("p1", 10, 70), paragraph("p2", 71, 130),
+                               paragraph("p3", 162, 220)],
+                   preserved=[dict(page=0, bbox=[10, 140, 100, 160])])
+        items = [dict(paragraph=pid, page=0, line=0, kind="text", text="测试", size=10,
+                      baseline=y + 8, bbox=[10, y, 30, y + 10])
+                 for pid, y in (("p1", 10), ("p2", 71), ("p3", 162))]
+        records = balance_columns(doc, items)
+        self.assertLessEqual(items[1]["bbox"][1] - items[0]["bbox"][3], 6.01)
+        self.assertLess(items[1]["bbox"][3], 140)
+        self.assertGreaterEqual(items[2]["bbox"][1], 160)
+        self.assertEqual([r["paragraphs"] for r in records], [["p1", "p2"], ["p3"]])
+
+    def test_heading_before_spacing_uses_spare_height_and_keeps_groups_together(self):
+        from layoutpdf.balance import balance_columns
+
+        def sample(specs, barrier):
+            doc = dict(pages=[dict(width=220, height=320)], paragraphs=[],
+                       preserved=[dict(page=0, bbox=[10, barrier, 100, barrier + 10])])
+            items = []
+            for pid, role, top, bottom in specs:
+                doc["paragraphs"].append(dict(id=pid, page=0, role=role,
+                                             bbox=[10, top, 100, bottom], erase=[[10, top, 100, bottom]]))
+                items.append(dict(paragraph=pid, page=0, line=0, kind="text", text="测试", size=10,
+                                  baseline=top + 8, bbox=[10, top, 30, top + 10]))
+            return doc, items
+
+        doc, items = sample([("b1", "body", 10, 70), ("b2", "body", 71, 130),
+                             ("h1", "heading", 131, 145), ("b3", "body", 146, 210),
+                             ("h2", "heading", 211, 225), ("sub", "subheading", 226, 240),
+                             ("b4", "body", 241, 285)], 290)
+        balance_columns(doc, items)
+        gap = lambda index: items[index]["bbox"][1] - items[index - 1]["bbox"][3]
+        self.assertGreater(gap(2), gap(1))
+        self.assertGreater(gap(2), gap(3))
+        self.assertAlmostEqual(gap(2), gap(4))
+        self.assertLess(gap(5), gap(4))
+        self.assertEqual(items[0]["bbox"][1], 10)
+        self.assertLess(items[-1]["bbox"][3], 290)
+        roomy_heading_gap = gap(2)
+
+        doc, items = sample([("b1", "body", 10, 20), ("b2", "body", 23, 33),
+                             ("h1", "heading", 38.5, 48.5), ("b3", "body", 51.5, 61.5)], 63.5)
+        records = balance_columns(doc, items)
+        self.assertTrue(records)
+        self.assertLess(gap(2), roomy_heading_gap)
+        self.assertGreater(gap(2), gap(3))
+        self.assertLessEqual(items[-1]["bbox"][3], 61.51)
+
+    def test_neighboring_line_glyph_in_empty_formula_corner_is_vector_masked(self):
+        source = self.root / "mask-source.pdf"
+        folder = self.root / "mask-assets"
+        (folder / "assets").mkdir(parents=True)
+        with fitz.open() as pdf:
+            page = pdf.new_page(width=160, height=140)
+            page.insert_text((20, 45), "x", fontname="tiit", fontsize=10)
+            page.insert_text((65, 65), "y", fontname="tiit", fontsize=10)
+            page.insert_text((42, 62), "z", fontsize=10)
+            pdf.save(source)
+        with fitz.open(source) as pdf:
+            raw = pdf[0].get_text("rawdict")
+            from layoutpdf.fonts import annotate_ink
+            annotate_ink(pdf, pdf[0], raw)
+            glyphs = [g for b in raw["blocks"] if b["type"] == 0 for g in extract_module.glyphs(b)]
+            group = [g for g in glyphs if g["text"] in {"x", "y"}]
+            assets, diagnostics = {}, []
+            aid = extract_module.make_asset(pdf, 0, group, 45, "inline", assets, folder, glyphs, diagnostics)
+            self.assertEqual([d["code"] for d in diagnostics], ["parse/formula-vector-mask"])
+            with fitz.open(folder / assets[aid]["file"]) as asset:
+                box = fitz.Rect(assets[aid]["bbox"])
+                neighbor = next(g for g in glyphs if g["text"] == "z")
+                rect = fitz.Rect(neighbor["ink_bbox"]) + (-box.x0, -box.y0, -box.x0, -box.y0)
+                pixels = asset[0].get_pixmap(matrix=fitz.Matrix(3, 3), clip=rect, colorspace=fitz.csGRAY)
+                self.assertTrue(all(value == 255 for value in pixels.samples))
+                self.assertTrue(any(value < 128 for value in asset[0].get_pixmap().samples))
 
     def test_collection_font_uses_target_language_face(self):
         for metadata in self.doc["fonts"].values():

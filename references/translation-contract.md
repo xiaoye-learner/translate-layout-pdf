@@ -8,6 +8,8 @@ Translate semantic paragraphs in `batches.json`; never translate extracted PDF l
 - `[[Pdddd]]` protects a URL, email address, DOI, citation, or similar literal. Keep it exactly; the renderer restores the source text.
 - Do not introduce another token-shaped string. Do not put a token on a separate line unless its surrounding paragraph is itself a display formula flow.
 
+Inspect assets adjacent to prose punctuation. A vector token can already contain a source parenthesis or separator; preserve it once and do not add a duplicate in the translated prose. Maintain the semantic boundary on either side of a fixed display equation even when the surrounding text shares a continuation flow.
+
 The merge command rejects missing, duplicated, reordered, unknown, empty, multiline, and fenced translations as one atomic batch. A rejected batch makes no partial edits.
 
 ## Role decisions

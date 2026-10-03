@@ -29,8 +29,9 @@ atomic output directory
 - `contracts.py`: JSON Schema validation, structure sealing, asset/source/font hashes, token order, coverage and flow checks, atomic JSON writes, typed diagnostics.
 - `extract.py`: two-dimensional glyph analysis, paragraph and column flow inference, mixed formula/prose decomposition, containment-based formula-fragment absorption, same-flow semantic-fragment merging, conservative preservation, math-token creation, style inference.
 - `fonts.py`: actual glyph ink bounds, including embedded Type 1 outline handling. This prevents nominal PDF font boxes from treating empty descender space as formula overlap.
-- `layout.py`: measured token layout, baseline-aware vector math placement, two-em paragraph indentation, shared style scaling, source-container flow, punctuation constraints, and relative-overlap collision checks that distinguish meaningful intersections from tiny glyph-edge contact.
-- `pipeline.py`: atomic batch merge, bounded corrections, reconstruction, formula/preserved-region image comparison, bilingual composition, rendered evidence, hash-bound review, atomic delivery.
+- `layout.py`: measured token layout, baseline-aware vector math placement, two-em paragraph indentation, shared style scaling, source-container flow, punctuation constraints, fixed-display semantic boundaries, unchanged-flow retention, and relative-overlap collision checks with a per-page vertical sweep.
+- `balance.py`: source-column regions bounded by fixed objects; semantic paragraph packing and bounded redistribution of spare height, prioritizing heading-before spacing by level while keeping consecutive headings together. `column_regions` records distributed height, measured heading spacing, and remaining tail. `source` layout mode bypasses this stage.
+- `pipeline.py`: atomic batch merge, bounded corrections, reconstruction, formula/preserved/unchanged-region image comparison, source retention with original links, bilingual composition, rendered evidence, hash-bound review, atomic delivery.
 
 ## Data boundaries
 

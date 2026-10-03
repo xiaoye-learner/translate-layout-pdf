@@ -286,6 +286,7 @@ def split_paragraphs(lines):
 
 def make_asset(doc, page_index, group, baseline, placement, assets, job, page_glyphs, diagnostics):
     bbox = fitz.Rect(rect_union([g["ink_bbox"] for g in group]))
+    ink_regions = [fitz.Rect(g["ink_bbox"]) + (-.02, -.02, .02, .02) for g in group]
     bbox.x0 -= .15
     bbox.x1 += .15
     # Tight academic layouts can leave only hundredths of a point between a
@@ -299,11 +300,17 @@ def make_asset(doc, page_index, group, baseline, placement, assets, job, page_gl
         padded = dr + (-.2, -.2, .2, .2)
         if not (padded & bbox).is_empty and dr.width < max(bbox.width * 3, 20) and dr.height < max(bbox.height * 1.4, 5):
             bbox |= padded
+            ink_regions.append(padded)
     # Reject a clip that contains unrelated source glyphs. A successful crop alone proves nothing.
     identities = {(g["x"], g["y"], g["text"]) for g in group}
     others = [g for g in page_glyphs if (g["x"], g["y"], g["text"]) not in identities
               and overlap_fraction(g["ink_bbox"], bbox) >= .02]
-    if others:
+    # A neighboring line can enter a formula's rectangular crop through an empty
+    # corner. A union of the formula's ink rectangles isolates that case as vectors.
+    # Actual ink intersections still take the conservative preservation path.
+    ink_collision = any(not (region & fitz.Rect(g["ink_bbox"])).is_empty
+                        for region in ink_regions for g in others)
+    if others and ink_collision:
         raise Failure([issue("parse/formula-ambiguous", {"page": page_index + 1, "bbox": list(bbox)},
                              {"overlapping_text": plain_text(others)},
                              ["inspect source formula boundaries before translating"], stage="prepare")])
@@ -311,6 +318,20 @@ def make_asset(doc, page_index, group, baseline, placement, assets, job, page_gl
     out = fitz.open()
     target = out.new_page(width=bbox.width, height=bbox.height)
     target.show_pdf_page(target.rect, doc, page_index, clip=bbox)
+    if others:
+        clip = ["q"]
+        for region in ink_regions:
+            r = region & bbox
+            clip.append(f"{r.x0 - bbox.x0:.6f} {bbox.y1 - r.y1:.6f} {r.width:.6f} {r.height:.6f} re")
+        clip.append("W n")
+        stream = out.get_new_xref()
+        out.update_object(stream, "<<>>")
+        out.update_stream(stream, ("\n".join(clip) + "\n").encode() + target.read_contents() + b"\nQ\n")
+        target.set_contents(stream)
+        diagnostics.append(issue("parse/formula-vector-mask", {"page": page_index + 1, "bbox": list(bbox)},
+                                 {"excluded_neighbor_glyphs": len(others), "overlapping_text": plain_text(others)},
+                                 ["compare masked formula strokes with the source at 144 DPI"],
+                                 severity="warning", stage="prepare"))
     file = f"assets/{asset_id}.pdf"
     out.save(job / file, garbage=4, deflate=True, no_new_id=True)
     out.close()
@@ -474,7 +495,8 @@ def prepare(source, job, target_language="zh-CN", regular=None, bold=None):
             nonmath_text = " ".join(plain_text([g for i, g in enumerate(l["glyphs"]) if i not in {j for group in math_groups(l) for j in group}]) for l in lines)
             only_math = any_math and not re.search(r"[A-Za-z\u3400-\u9fff]{2,}", nonmath_text)
             prose_letters = sum(c.isalpha() for c in nonmath_text)
-            display_equation = (any_math and len(lines) <= 3 and ("=" in text or "∈" in text)
+            math_fraction = sum(len(group) for line in lines for group in math_groups(line)) / max(1, len(gs))
+            display_equation = (any_math and len(lines) <= 3 and ("=" in text or "∈" in text or math_fraction > .60)
                                 and fitz.Rect(bbox).width < page.rect.width * .68
                                 and prose_letters <= 8)
             numeric = not re.search(r"[A-Za-z\u3400-\u9fff]{2,}", text) and not re.search(r"[A-Za-z]{1,}", text)
