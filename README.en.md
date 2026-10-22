@@ -23,8 +23,6 @@ The English source is on the left; the current engine's Chinese output is on the
 
 ![Actual translated heading and body spacing, plus the PDF search bounds for the Chinese short-paragraph phrase](docs/assets/synthetic-details.png)
 
-The blue box comes from the actual PDF search coordinates for “短段落” (short paragraph). The generator requires exactly one hit, verifies that copying its bounds returns the expected text, and runs text-layer integrity checks. This illustrates search coordinates; it is not a reader UI screenshot or a claim that every drag-selection gesture has been tested in every reader.
-
 ## Pipeline
 
 ```mermaid
