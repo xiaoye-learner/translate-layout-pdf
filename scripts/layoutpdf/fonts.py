@@ -4,6 +4,7 @@ from io import BytesIO
 from pathlib import Path
 import re
 import tempfile
+import unicodedata
 
 import pymupdf as fitz
 from fontTools.agl import toUnicode
@@ -78,6 +79,77 @@ def register_document_font(page, fontname, metadata):
     if buffer is not None:
         return page.insert_font(fontname=fontname, fontbuffer=buffer)
     return page.insert_font(fontname=fontname, fontfile=metadata["path"])
+
+
+def _unicode_destination(value):
+    # MuPDF 1.26 can emit supplementary code points as scalar hex (five or
+    # six digits), rather than the UTF-16BE pairs required by a ToUnicode CMap.
+    if len(value) <= 6:
+        return chr(int(value, 16))
+    return bytes.fromhex(value).decode("utf-16-be")
+
+
+def normalize_tounicode_cmap(data):
+    """Canonicalize generated font aliases without changing CIDs or glyphs.
+
+    Noto maps several canonical CJK characters and their compatibility forms
+    to one glyph. MuPDF's reverse cmap can choose the compatibility form,
+    breaking literal search for the ordinary character, e.g. 落 -> 落.
+    NFC restores canonical equivalents; NFKC would change unrelated typography.
+    """
+    text=data.decode("ascii")
+    entries={}
+    for block in re.finditer(r"\d+\s+beginbf(char|range)\s*(.*?)\s*endbf\1",text,re.S):
+        if block[1]=="char":
+            for cid,dest in re.findall(r"<([\da-fA-F]+)>\s*<([\da-fA-F]+)>",block[2]):
+                entries[int(cid,16)]=_unicode_destination(dest)
+        else:
+            pattern=r"<([\da-fA-F]+)>\s*<([\da-fA-F]+)>\s*(<([\da-fA-F]+)>|\[([^]]*)\])"
+            for match in re.finditer(pattern,block[2],re.S):
+                start,end=int(match[1],16),int(match[2],16)
+                if match[4]:
+                    dest=match[4]
+                    for offset,cid in enumerate(range(start,end+1)):
+                        value=f"{int(dest,16)+offset:0{len(dest)}x}"
+                        entries[cid]=_unicode_destination(value)
+                else:
+                    values=re.findall(r"<([\da-fA-F]+)>",match[5])
+                    if len(values)!=end-start+1:
+                        raise ValueError("ToUnicode range array length mismatch")
+                    for cid,value in zip(range(start,end+1),values):
+                        entries[cid]=_unicode_destination(value)
+    if not entries:
+        return data
+    lines=["/CIDInit /ProcSet findresource begin", "12 dict begin", "begincmap",
+           "/CIDSystemInfo <</Registry(Adobe)/Ordering(UCS)/Supplement 0>> def",
+           "/CMapName /LayoutPDF-Identity-UCS def", "/CMapType 2 def",
+           "1 begincodespacerange", "<0000> <FFFF>", "endcodespacerange"]
+    ordered=sorted(entries.items())
+    for start in range(0,len(ordered),100):
+        chunk=ordered[start:start+100]
+        lines.append(f"{len(chunk)} beginbfchar")
+        lines.extend(f"<{cid:04x}> <{unicodedata.normalize('NFC',value).encode('utf-16-be').hex()}>"
+                     for cid,value in chunk)
+        lines.append("endbfchar")
+    lines.extend(["endcmap","CMapName currentdict /CMap defineresource pop","end","end",""])
+    return "\n".join(lines).encode("ascii")
+
+
+def normalize_generated_font_unicode(document, font_xrefs):
+    """Repair only fonts registered for generated prose, preserving source fonts."""
+    seen=set()
+    for font_xref in font_xrefs:
+        kind,reference=document.xref_get_key(font_xref,"ToUnicode")
+        if kind!="xref":
+            continue
+        xref=int(reference.split()[0])
+        if xref in seen:
+            continue
+        seen.add(xref)
+        data=document.xref_stream(xref)
+        normalized=normalize_tounicode_cmap(data)
+        if normalized!=data:
+            document.update_stream(xref,normalized)
 
 
 @lru_cache(maxsize=128)

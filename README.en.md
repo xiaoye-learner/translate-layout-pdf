@@ -76,7 +76,7 @@ python -m unittest discover -s tests -v
 python tests/run_sample.py ./sample-output
 ```
 
-Tests generate their own synthetic PDFs and do not require third-party papers. The current 52-test suite includes mixed formula/prose lines, overlapping formula fragments, tiny edge-contact tolerance, vector corner masks, column balancing around fixed objects, unchanged source flows, semantic boundaries at display equations, target-language collection-face selection, inline scripts and fractions, display equations, CJK indentation and leading, heading consistency and before-spacing, dense-region spacing fallback, continuation flows, protected tables, review gates, and artifact tamper detection.
+Tests generate their own synthetic PDFs and do not require third-party papers. The current 54-test suite includes mixed formula/prose lines, overlapping formula fragments, tiny edge-contact tolerance, vector corner masks, column balancing around fixed objects, unchanged source flows, semantic boundaries at display equations, target-language collection-face selection, inline scripts and fractions, display equations, CJK indentation and leading, heading consistency and before-spacing, dense-region spacing fallback, continuation flows, protected tables, review gates, artifact tamper detection, and literal search across CJK font aliases and supplementary Unicode characters.
 
 ## Limitations
 

@@ -10,7 +10,7 @@ import pymupdf as fitz
 from PIL import Image, ImageChops
 
 from .contracts import Failure, check_translation, digest, engine_digest, issue, object_digest, read, require, seal, validate, write
-from .fonts import register_document_font
+from .fonts import register_document_font, normalize_generated_font_unicode
 from .layout import Typesetter
 from .inspection import review_plan
 from .selection import materialize_clip, glyph_count, audit_selection, audit_dual_selection
@@ -173,6 +173,7 @@ def build(job, preflight=False, layout_mode="balanced"):
         if check["raster_difference"] > .01:
             errors.append(issue("selection/clip-changed-ink",aid,check,stage="artifact"))
     expected_glyphs = []
+    generated_font_xrefs=set()
     try:
         for page_index, page in enumerate(mono):
             original_links = source[page_index].get_links()
@@ -197,7 +198,7 @@ def build(job, preflight=False, layout_mode="balanced"):
                 if not any(link.get("uri") == other.get("uri") and link.get("from") == other.get("from") for other in current_links):
                     page.insert_link({k: v for k, v in link.items() if k not in {"xref", "id"}})
             for key, font in doc["fonts"].items():
-                register_document_font(page, "lp" + key, font)
+                generated_font_xrefs.add(register_document_font(page, "lp" + key, font))
             # Consecutive text units are coalesced per baseline to preserve searchable text.
             items = [item for item in plan["placements"] if item["page"] == page_index]
             reading_order = {p["id"]:i for i,p in enumerate(doc["paragraphs"])}
@@ -228,6 +229,7 @@ def build(job, preflight=False, layout_mode="balanced"):
                 i = j
             expected_glyphs.append(expected)
         mono.subset_fonts()
+        normalize_generated_font_unicode(mono,generated_font_xrefs)
         mono.save(mono_path, garbage=4, deflate=True, no_new_id=True)
         mono.close()
         mono = fitz.open(mono_path)

@@ -38,6 +38,8 @@ Each mono page must have exactly the baseline retained glyphs plus written prose
 
 Already delivered PDFs do not update when the skill changes. Rebuild from the original job using the fixed engine; do not reuse the old bilingual artifact. Existing translations and sealed asset files can remain unchanged.
 
+Generated-font ToUnicode mappings are normalized with NFC and encoded as UTF-16BE after font subsetting. This prevents Noto CJK reverse glyph maps from returning compatibility aliases such as `落` instead of `落`, which can look identical but fail literal search. Preserve literal search/copy assertions across fonts; do not bypass a failed search by normalizing only the test query or skipping the assertion. Source font mappings remain unchanged.
+
 `correct` takes JSON entries with `id`, `field`, `value`, `reason`. Supported fields: paragraph `role`, `continuation`, `continuation_of` (predecessor ID), and formula `placement` (asset ID). It re-seals the contract. Do not edit geometry, hash fields or thresholds by hand.
 
 | Failure | Correct the cause |
