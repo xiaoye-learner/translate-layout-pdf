@@ -24,3 +24,5 @@ jobs:
         run: python scripts/layout_pdf.py doctor
       - name: Tests
         run: python -m unittest discover -s tests -v
+      - name: README sample checks
+        run: python docs/generate_samples.py ./sample-output/readme --assets-dir ./sample-output/readme-images

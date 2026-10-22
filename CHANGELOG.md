@@ -4,6 +4,7 @@ All notable changes to this project will be documented here.
 
 ## Unreleased
 
+- Refreshed the bilingual README previews from an original synthetic document, added actual search-bound illustrations and a reproducible image generator, and consolidated capability and limitation descriptions in both languages.
 - Canonicalized generated-font ToUnicode mappings with NFC and valid UTF-16BE destinations, restoring literal CJK search across Noto font aliases without changing glyphs or weakening search assertions.
 - Added portable synthetic-font regression tests for compatibility aliases, supplementary characters and unchanged rendering; the suite now contains 54 tests.
 - Physically removed off-clip text from formula assets and cleaned legacy assets in memory, preventing invisible source-page text from polluting selection and copying.
