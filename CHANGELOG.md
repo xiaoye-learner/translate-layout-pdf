@@ -4,6 +4,13 @@ All notable changes to this project will be documented here.
 
 ## Unreleased
 
+- Physically removed off-clip text from formula assets and cleaned legacy assets in memory, preventing invisible source-page text from polluting selection and copying.
+- Added glyph-budget, off-page and bilingual-half checks, with before/after raster checks for clip cleanup and semantic-order text insertion.
+- Inherited body column widths for short headings, composed same-page continuations before wrapping, and allocated bounded CJK baseline and heading spacing.
+- Normalized common multi-line titles and bullet continuations, added cached CFF subset-font ink metrics, and improved formula-line and table boundary detection.
+- Added compact CLI diagnostics, page-specific inspection, fail-fast layout checks, focused visual evidence and pixel-based changed-page reporting.
+- Expanded the regression suite to 52 tests and excluded local credentials, task data, coverage and packaged archives from Git.
+
 - Added level-specific space before headings with priority over body-leading expansion, compact consecutive heading groups, dense-region fallback, and measured heading-gap records.
 
 - Kept Latin symbol labels and consecutive inline formula assets together when wrapping, preventing isolated NBT/AUC script fragments.

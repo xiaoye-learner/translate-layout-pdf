@@ -16,3 +16,28 @@ work/
 *.pdf
 .DS_Store
 Thumbs.db
+
+# Local credentials (example configurations may be committed).
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Additional local runtimes, coverage and package builds.
+.tox/
+.nox/
+.cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+dist/
+*.egg-info/
+
+# Task data and locally packaged skill archives.
+tmp/
+temp/
+jobs/
+runs/
+*.zip
+*.7z

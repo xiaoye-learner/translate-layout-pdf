@@ -12,6 +12,8 @@ from PIL import Image, ImageChops
 from .contracts import Failure, check_translation, digest, engine_digest, issue, object_digest, read, require, seal, validate, write
 from .fonts import register_document_font
 from .layout import Typesetter
+from .inspection import review_plan
+from .selection import materialize_clip, glyph_count, audit_selection, audit_dual_selection
 
 
 def load_job(job, translated=False):
@@ -102,6 +104,12 @@ def difference(a, b):
 
 
 def compose_dual(source, mono, path):
+    # Finish every source mutation before show_pdf_page creates a graft map;
+    # MuPDF sizes that map from the source xref table at first insertion.
+    for i in range(len(source)):
+        cleaned=materialize_clip(source[i])
+        if cleaned["raster_difference"] > .01:
+            raise Failure([issue("selection/clip-changed-ink",dict(page=i+1,side="source"),cleaned,stage="artifact")])
     dual = fitz.open()
     for i in range(len(source)):
         a, b = source[i].rect, mono[i].rect
@@ -138,10 +146,33 @@ def build(job, preflight=False, layout_mode="balanced"):
     build_dir = Path(tempfile.mkdtemp(prefix="build-", dir=job))
     write(build_dir / "document.json", doc)
     write(build_dir / "layout.json", plan)
+    if any(d["severity"] == "error" for d in errors):
+        # Do not spend a full render / raster-comparison cycle on an already
+        # invalid layout. Keep the failed plan for diagnosis and recovery.
+        receipt = dict(schema="layout-receipt/v1", source_document_sha256=snapshot_hash,
+                       engine_sha256=engine_digest(), snapshot_sha256=digest(build_dir / "document.json"),
+                       layout_sha256=digest(build_dir / "layout.json"), preflight=preflight,
+                       ok=False, diagnostics=errors, formulas=[], page_count=len(doc["pages"]),
+                       artifacts={}, visual_review="unavailable", stopped_at="layout")
+        history_file=job/"history.json"
+        history=read(history_file) if history_file.exists() else []
+        fingerprint=sorted({(d["code"],json.dumps(d["subject"],sort_keys=True)) for d in errors})
+        history.append(dict(build=build_dir.name,errors=len(fingerprint),fingerprint=fingerprint,ok=False))
+        write(history_file,history)
+        write(build_dir/"receipt.json",receipt)
+        write(job/"latest.json",dict(build=build_dir.name))
+        return dict(build=str(build_dir),**receipt)
     mono_path = build_dir / "translated.pdf"
     source = fitz.open(job / "source.pdf")
     mono = fitz.open(job / "source.pdf")
     assets = {k: fitz.open(job / a["file"]) for k, a in doc["assets"].items()}
+    # Legacy sealed jobs may contain whole-page Form XObjects in tiny formula
+    # files. Clean only the in-memory copies, preserving source/asset hashes.
+    asset_selection = {k:materialize_clip(asset[0]) for k,asset in assets.items()}
+    for aid,check in asset_selection.items():
+        if check["raster_difference"] > .01:
+            errors.append(issue("selection/clip-changed-ink",aid,check,stage="artifact"))
+    expected_glyphs = []
     try:
         for page_index, page in enumerate(mono):
             original_links = source[page_index].get_links()
@@ -157,6 +188,8 @@ def build(job, preflight=False, layout_mode="balanced"):
                     page.add_redact_annot(a["bbox"], fill=False, cross_out=False)
             page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED)
             page = mono.reload_page(page)
+            materialize_clip(page,verify=False)
+            expected = glyph_count(page)
             current_links = page.get_links()
             for link in original_links:
                 if any(not (fitz.Rect(link["from"]) & rect).is_empty for rect in erased):
@@ -167,11 +200,14 @@ def build(job, preflight=False, layout_mode="balanced"):
                 register_document_font(page, "lp" + key, font)
             # Consecutive text units are coalesced per baseline to preserve searchable text.
             items = [item for item in plan["placements"] if item["page"] == page_index]
+            reading_order = {p["id"]:i for i,p in enumerate(doc["paragraphs"])}
+            items.sort(key=lambda item:(reading_order[item["paragraph"]],item["line"],item["x"]))
             i = 0
             while i < len(items):
                 item = items[i]
                 if item["kind"] == "math":
                     page.show_pdf_page(fitz.Rect(item["bbox"]), assets[item["asset"]], 0, keep_proportion=False)
+                    expected += asset_selection[item["asset"]]["after"]
                     i += 1
                     continue
                 text = item["text"]
@@ -183,16 +219,23 @@ def build(job, preflight=False, layout_mode="balanced"):
                     text += other["text"]
                     j += 1
                 page.insert_text((item["x"], item["baseline"]), text, fontsize=item["size"], fontname="lp" + item["font"], color=(0, 0, 0))
+                expected += len(text)
                 if item.get("link_uri"):
                     region = fitz.Rect(items[i]["bbox"])
                     for linked in items[i + 1:j]:
                         region |= fitz.Rect(linked["bbox"])
                     page.insert_link({"kind": fitz.LINK_URI, "from": region, "uri": item["link_uri"]})
                 i = j
+            expected_glyphs.append(expected)
         mono.subset_fonts()
         mono.save(mono_path, garbage=4, deflate=True, no_new_id=True)
         mono.close()
         mono = fitz.open(mono_path)
+        selection_checks=[]
+        for i,page in enumerate(mono):
+            check,diagnostics=audit_selection(page,expected_glyphs[i],dict(page=i+1))
+            selection_checks.append(dict(page=i+1,**check))
+            errors.extend(diagnostics)
         formula_checks = []
         for item in plan["placements"]:
             if item["kind"] == "math":
@@ -230,11 +273,16 @@ def build(job, preflight=False, layout_mode="balanced"):
         with fitz.open(dual_path) as dual:
             if len(dual) != len(mono) or any(abs(dual[i].rect.width - 2 * mono[i].rect.width) > .01 for i in range(len(mono))):
                 errors.append(issue("artifact/dual-pages", "bilingual.pdf", {}, stage="artifact"))
+            for i,page in enumerate(dual):
+                _,diagnostics=audit_dual_selection(page,source[i],mono[i])
+                errors.extend(diagnostics)
         receipt = dict(schema="layout-receipt/v1", source_document_sha256=snapshot_hash,
                        engine_sha256=engine_digest(), snapshot_sha256=digest(build_dir / "document.json"),
                        layout_sha256=digest(build_dir / "layout.json"), preflight=preflight,
                        ok=not any(d["severity"] == "error" for d in errors), diagnostics=errors,
                        formulas=formula_checks, page_count=len(mono), visual_review="pending",
+                       selection_checks=selection_checks,
+                       clipped_asset_glyphs_removed=sum(r["before"]-r["after"] for r in asset_selection.values()),
                        artifacts={"mono": {"file": "translated.pdf", "sha256": digest(mono_path)},
                                   "dual": {"file": "bilingual.pdf", "sha256": digest(dual_path)}})
         history_file = job / "history.json"
@@ -275,8 +323,9 @@ def current(job):
     return build_dir, receipt
 
 
-def review(job, status=None, notes=None, evidence_hash=None):
+def review(job, status=None, notes=None, evidence_hash=None, full=False):
     build_dir, receipt = current(job)
+    require(receipt["diagnostics"])
     if status:
         evidence = read(build_dir / "evidence.json")
         if evidence_hash != object_digest(evidence) or not notes or not notes.strip():
@@ -289,19 +338,50 @@ def review(job, status=None, notes=None, evidence_hash=None):
         write(build_dir / "review.json", record)
         return record
     images = {}
+    document = read(build_dir / "document.json")
+    plan = read(build_dir / "layout.json")
+    details = review_plan(document, plan)
+    detailed_pages = set(range(1, receipt["page_count"]+1)) if full else {r["page"] for r in details}
+    # Reuse *pixel-identical* visual evidence only when the prior review passed.
+    # Engine or layout hashes alone cannot prove that rendered pages are equal.
+    prior = {}
+    for prior_dir in sorted(Path(job).glob("build-*"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if prior_dir == build_dir or not (prior_dir / "review.json").exists():
+            continue
+        record = read(prior_dir / "review.json")
+        if record.get("status") != "passed" or not (prior_dir / "evidence.json").exists():
+            continue
+        evidence = read(prior_dir / "evidence.json")
+        if record.get("evidence_sha256") != object_digest(evidence):
+            continue
+        prior = evidence.get("images", {})
+        break
+    changed_pages = set()
     for kind, item in receipt["artifacts"].items():
         pdf = fitz.open(build_dir / item["file"])
         for dpi in (72, 144):
+            # Mono contact sheets give the complete reading sequence. Detailed
+            # bilingual pages cover source alignment and translated typography
+            # together, avoiding four downscaled copies of every sheet.
+            if dpi == 144 and kind == "mono" and not full:
+                continue
             thumbs = []
             for i, page in enumerate(pdf):
+                if dpi == 144 and i+1 not in detailed_pages:
+                    continue
                 path = build_dir / f"{kind}-{dpi}-p{i + 1:04d}.png"
                 pix = page.get_pixmap(dpi=dpi, alpha=False)
                 pix.save(path)
                 images[path.name] = digest(path)
+                if kind == "mono" and dpi == 72 and prior.get(path.name) != images[path.name]:
+                    changed_pages.add(i+1)
+                    detailed_pages.add(i+1) if prior else None
                 image = Image.open(path).convert("RGB")
                 image.thumbnail((480, 640))
                 thumbs.append(image)
             # Bounded sheets retain useful size on long documents.
+            if not full and (kind != "mono" or dpi != 72):
+                continue
             for start in range(0, len(thumbs), 6):
                 chunk = thumbs[start:start + 6]
                 sheet = Image.new("RGB", (960, 660 * ((len(chunk) + 1) // 2)), "#dddddd")
@@ -311,9 +391,14 @@ def review(job, status=None, notes=None, evidence_hash=None):
                 sheet.save(path)
                 images[path.name] = digest(path)
         pdf.close()
-    evidence = dict(artifacts=receipt["artifacts"], images=images, pages=receipt["page_count"], status="pending")
+    evidence = dict(artifacts=receipt["artifacts"], images=images, pages=receipt["page_count"], status="pending",
+                    detail_plan=details, detail_pages=sorted(detailed_pages), changed_pages=sorted(changed_pages),
+                    mode="full" if full else "focused")
     write(build_dir / "evidence.json", evidence)
-    return dict(directory=str(build_dir), evidence_sha256=object_digest(evidence), visual_review="pending")
+    return dict(directory=str(build_dir), evidence_sha256=object_digest(evidence), visual_review="pending",
+                contact_sheets=[name for name in images if "sheet" in name],
+                detail_pages=sorted(detailed_pages), changed_pages=sorted(changed_pages),
+                detail_plan=details, rendered_images=len(images))
 
 
 def deliver(job, output):

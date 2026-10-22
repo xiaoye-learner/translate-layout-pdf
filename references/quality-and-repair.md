@@ -1,50 +1,53 @@
 # Quality and repair
 
-The pipeline separates objective checks from visual judgment. A successful build proves schema validity, source/font/asset identity, geometry bounds, non-overlap with preserved regions, complete glyph coverage, formula raster equivalence, preserved-region equivalence, output hashes, and bilingual page pairing. It does not prove translation quality or visual balance.
+Objective checks cover schema, source/font/asset identity, tokens, bounds, overlap, glyph coverage, formula raster equivalence, preserved source ink, links, hashes and bilingual pairing. Keep them global. Visual review assesses reading rhythm and translation; it is not the primary layout solver.
 
-## Review
+## Typography policy
 
-At 72 DPI, check normal reading size: text must be legible, columns must remain separate, and no paragraph may become an isolated fragment. At 144 DPI, compare formulas, headings, dense pages, tables, figures, links, headers, footers, and page numbers with the source.
+Allocate space in obstacle-free column regions, including captions and short headings. A heading inherits the neighboring text column; its ink width does not define another column. Same-page continuations share a frame before wrapping. Pages, columns and fixed display equations remain boundaries.
 
-Check these reported problem classes directly:
-
-- subscripts, superscripts, fractions, and formula strokes retain their two-dimensional source form;
-- inline mathematics shares the prose line rather than creating an empty line;
-- each real Chinese/Japanese body paragraph starts at two em, while continuations and headings do not;
-- headings of the same style have the same size and a visibly bold face;
-- text contraction does not leave avoidable paragraph-sized holes, and expansion does not clip or overlap.
-
-For abrupt whitespace, inspect `layout.json/column_regions` and preserved-region diagnostics before changing prose. `distributed_height` reports bounded spacing added to a clear column region; `remaining_tail` is space that would require excessive spacing or a different page-flow policy to fill. A retained English paragraph with `parse/formula-preserved` is a parsing problem. Inspect `parse/formula-vector-mask` crops at 144 DPI to confirm every source formula stroke is intact. Unchanged flows are listed in `retained_paragraphs` and must retain source ink and links. Formula boundaries must not carry citations or sentence endings to the wrong side. Use `build --layout-mode source` when source-oriented vertical correspondence takes priority over balanced reading.
-
-Record concrete review notes, for example: `2 pages inspected at 72/144 DPI; both inline assets share their prose baselines; three H1 headings use the same bold face; no overlap or clipping.` Generic notes such as `looks good` do not provide useful evidence.
-
-## Heading spacing
-
-In balanced CJK layout, headings following prose use the following space before their first line, measured in the heading's font size:
-
-| Boundary | Preferred base | Maximum with spare height |
+| Property | Preferred | Upper bound with spare room |
 | --- | ---: | ---: |
-| Prose to section heading | 1.00em | 1.50em |
-| Prose to subsection heading | 0.75em | 1.10em |
-| Consecutive section/subsection headings | 0.55em | 0.55em |
+| Body/list baseline distance | 1.50em | 1.80em |
+| Caption baseline distance | 1.30em | 1.50em |
+| Prose to section heading | 1.35em | 1.80em |
+| Prose to subsection heading | 1.05em | 1.50em |
+| Heading to following prose | 0.65em | 0.90em |
+| Consecutive heading levels | 0.55em | 0.55em |
+| Ordinary paragraph gap | 0.45em | 0.60em |
 
-Heading expansion takes priority over extra body leading. A heading at the start of a page does not receive a new top gap. At a region boundary after a fixed object, existing source spacing counts toward the preferred gap; already larger source gaps are not expanded. In a dense region, the preferred extra heading gap may fall back toward 0.55em to retain fit before any additional spacing is distributed. Fixed objects and page bounds remain unchanged.
+Measure baseline distance from placements, not a font's nominal line-height multiplier. Preserve larger formula clearances. Reserve heading separation before expanding body leading. Dense regions reduce added whitespace toward measured safe minima, never formula ink clearance. Regions that cannot fit bounded balancing keep the measured candidate and report `status: constrained` for detail review.
 
-Inspect `column_regions/heading_spacing` for the measured `before_gap` and `before_em`. Confirm visually that headings have a clear break from preceding prose, remain connected to their following text, and that consecutive heading levels remain a group.
+Do not expand into intentionally empty source tails. Unused height after reasonable caps is preferable to huge paragraph gaps. Fixed figures, tables, equations and page bounds remain fixed. Source mode is for explicit vertical alignment, not a repair escape hatch.
+
+`layout.json/column_regions` records heading `before_em`, `paragraph_gaps`, actual `baseline_steps_em`, distributed height, remaining tail and constrained regions. Diagnose holes from these metrics and the obstacle map before changing wording. `composed_flows` records same-page frames joined without changing the source contract.
+
+## Review once, then by changes
+
+Inspect all mono 72-DPI contact sheets and the reported bilingual 144-DPI detail pages. The plan selects unsafe parsing, constrained regions and representative typography/math/table pages. Add detail when a sheet exposes a possible defect. All formulas and preserved regions still receive objective raster checks. Use `review --full` when exhaustive inspection is requested or representative pages reveal a systemic defect.
+
+Do not inspect full images and four sets of downscaled sheets showing the same pages. After repair use `changed_pages` against passed image hashes. Unchanged pixels need no repeated aesthetic judgment, but review must still bind to current evidence. Revisit neighbors when flow changes might affect continuity.
+
+Check coherent paragraphs, inline formula baselines, heading hierarchy and attachment to following text, legible captions, and whitespace spent on useful leading rather than mid-sentence holes. Inspect crop-mask warnings at detail scale and disclose retained prose. Record concrete observations; do not claim exhaustive high-resolution inspection from a sample.
 
 ## Repair boundary
 
-Use `correct` only with a JSON list whose entries contain `id`, `field`, `value`, and `reason`. Supported fields are paragraph `role`, paragraph `continuation`, explicit `continuation_of` using a predecessor paragraph ID, and formula `placement` using an asset ID. A correction re-seals the document and re-runs the full schema.
+Selection faults (`selection/*`) need content-stream inspection, not typography changes. `show_pdf_page(clip=...)` imports text from the whole source page; a clipped formula can carry thousands of invisible glyphs. Physically trim with `Page.clip_to_rect()` before saving a formula, after absorbed-fragment reconstruction, and in-memory when loading legacy formula files. Validate cleanup against the original rendered strokes. Do not rasterize formulas or cover unwanted text with white rectangles.
 
-Classify a failure before editing:
+Each mono page must have exactly the baseline retained glyphs plus written prose and clean formula glyphs, without off-page centers. Bilingual half counts must match the respective source and translated page. Inspect `receipt.json/selection_checks`. A normal bounded text extraction can look correct while hidden Form text remains, so use `get_texttrace()` for this check and, when available, an independent PDF.js text-content extraction. Search/copy tests should check a complete paragraph with a formula and both halves separately. Superscript/subscript linear copy order remains reader-dependent; these checks do not make the PDF fully tagged or PDF/UA compliant.
 
-| Stage/code family | Change |
-|---|---|
-| `parse/*`, wrong role or flow | Correct classification/continuation, or retain the block when isolation is unsafe. |
-| `translation/*` | Repair only the affected translation and immutable tokens. |
-| `layout/overflow` | First verify paragraph boundaries and flow. Compact the wording only when structure is correct. |
-| `layout/*overlap` | Correct structure; do not move sealed coordinates by hand. |
-| `formula/*`, `asset/*` | Re-prepare from the original or stop; never recreate mathematics as plain text. |
-| `artifact/*`, `review/*` | Rebuild or regenerate evidence from the current document. |
+Already delivered PDFs do not update when the skill changes. Rebuild from the original job using the fixed engine; do not reuse the old bilingual artifact. Existing translations and sealed asset files can remain unchanged.
 
-The job history stores error fingerprints. After two attempted fixes fail to improve the same objective errors, stop automatic repair, retain the job, and report the affected page/paragraph/formula plus the evidence. Visual corrections also stop after two unsuccessful rebuilds.
+`correct` takes JSON entries with `id`, `field`, `value`, `reason`. Supported fields: paragraph `role`, `continuation`, `continuation_of` (predecessor ID), and formula `placement` (asset ID). It re-seals the contract. Do not edit geometry, hash fields or thresholds by hand.
+
+| Failure | Correct the cause |
+| --- | --- |
+| `parse/*`, wrong flow/role | Correct semantics or retain an unsafe region; reuse unaffected translations. |
+| `translation/*` | Repair only affected strings/tokens. |
+| `layout/*overflow` | Check paragraph/column boundaries before meaning-preserving compaction. |
+| `layout/*overlap` | Correct structural boundaries or region composition. |
+| `formula/*`, `asset/*` | Re-prepare from source or report limits; never recreate math as plain text. |
+| `artifact/*`, `review/*` | Rebuild/regenerate current evidence. |
+| Tight leading/headings, internal holes | Check inherited lanes, composed flows and spacing metrics. |
+
+After two unsuccessful fixes with the same cause, retain the job and report affected pages/IDs. Do not multiply visual checks or silently accept a degraded layout to obtain a pass.

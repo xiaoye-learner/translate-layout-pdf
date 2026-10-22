@@ -17,7 +17,7 @@ The image is generated entirely by `tests/make_fixture.py` and contains no third
 - Separates mathematics from prose on mixed lines, absorbs overlapping script/number fragments into the formula asset, and rejoins prose split across formulas into one semantic paragraph. This prevents formula-dense sentences from being skipped or leaving isolated blank areas.
 - Uses relative overlap fractions for formula/prose collision decisions, tolerating tiny glyph-edge contact while retaining genuinely ambiguous source regions for review.
 - Uses vector clipping when a neighboring line enters an empty corner of a formula crop, without removing any intended formula ink.
-- Packs translated paragraphs within clear source column regions and distributes spare height through bounded leading and paragraph spacing. `build --layout-mode source` retains the earlier source-oriented vertical positioning.
+- Packs translated paragraphs within clear source column regions and distributes spare height through bounded leading and paragraph spacing. `build --layout-mode source` is reserved for an explicit vertical-alignment preference. Short headings inherit their text column, and CJK body baselines use bounded 1.50–1.80em spacing.
 - Reserves level-specific space before headings and gives heading expansion priority over extra body leading, keeping consecutive heading levels together and respecting dense-region limits.
 - Keeps explicitly unchanged paragraph flows in the source PDF, including their original typography and links.
 - Applies a two-em first-line indent to new Chinese and Japanese body paragraphs, excluding continuations.
@@ -26,7 +26,8 @@ The image is generated entirely by `tests/make_fixture.py` and contains no third
 - Adds a small explicit leading increase for CJK body text; constrained short or formula frames use audited local fallback, and one-character final lines are rebalanced within the paragraph.
 - Protects images, detected tables, standalone formulas, headers, footers, and other non-translatable regions.
 - Validates schemas, hashes, source coverage, fonts, assets, token order, geometry, and final PDF structure.
-- Produces translated and bilingual PDFs with hash-bound 72/144 DPI review evidence.
+- Produces translated and bilingual PDFs with hash-bound review evidence: all-page contact sheets and selected bilingual detail pages; `review --full` enables exhaustive evidence. Compact CLI reports and `inspect --pages` avoid repeatedly loading full records.
+- Physically removes invisible source-page text from formula crops, including legacy-job rebuilds, and checks glyph budgets, off-page text and bilingual side isolation to prevent incorrect selection and duplicate copying.
 
 ## Pipeline
 
@@ -75,7 +76,7 @@ python -m unittest discover -s tests -v
 python tests/run_sample.py ./sample-output
 ```
 
-Tests generate their own synthetic PDFs and do not require third-party papers. The current 40-test suite includes mixed formula/prose lines, overlapping formula fragments, tiny edge-contact tolerance, vector corner masks, column balancing around fixed objects, unchanged source flows, semantic boundaries at display equations, target-language collection-face selection, inline scripts and fractions, display equations, CJK indentation and leading, heading consistency and before-spacing, dense-region spacing fallback, continuation flows, protected tables, review gates, and artifact tamper detection.
+Tests generate their own synthetic PDFs and do not require third-party papers. The current 52-test suite includes mixed formula/prose lines, overlapping formula fragments, tiny edge-contact tolerance, vector corner masks, column balancing around fixed objects, unchanged source flows, semantic boundaries at display equations, target-language collection-face selection, inline scripts and fractions, display equations, CJK indentation and leading, heading consistency and before-spacing, dense-region spacing fallback, continuation flows, protected tables, review gates, and artifact tamper detection.
 
 ## Limitations
 

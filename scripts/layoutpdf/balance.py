@@ -4,8 +4,12 @@ from collections import defaultdict
 import pymupdf as fitz
 
 
-FLOW_ROLES = {"body", "list", "heading", "subheading"}
-HEADING_BEFORE = {"heading": (1.00, 1.50), "subheading": (.75, 1.10)}
+FLOW_ROLES = {"body", "list", "heading", "subheading", "caption"}
+HEADING_BEFORE = {"heading": (1.35, 1.80), "subheading": (1.05, 1.50)}
+# Baseline distances, not arbitrary increases to nominal font boxes. Fonts with
+# tall ascender/descender metrics must never acquire *less* line clearance.
+BODY_LEADING = (1.50, 1.80)
+CAPTION_LEADING = (1.30, 1.50)
 
 
 def source_box(paragraph):
@@ -32,7 +36,15 @@ def balance_columns(document, placements):
             continue
         width = document["pages"][p["page"]]["width"]
         box = fitz.Rect(p["bbox"])
-        lane = "wide" if box.width > width * .55 else "left" if (box.x0 + box.x1) / 2 < width / 2 else "right"
+        # A short heading has the column width of its following text, not its
+        # own ink width. Otherwise every heading becomes a false fixed obstacle
+        # splitting a full-width text column into independently anchored islands.
+        anchors = [q for q in document["paragraphs"] if q["page"] == p["page"]
+                   and q["role"] in {"body", "list"} and q["bbox"][2]-q["bbox"][0] > width*.30
+                   and abs(q["bbox"][0]-box.x0) < width*.08]
+        anchor = min(anchors, key=lambda q: (abs(q["bbox"][0]-box.x0), abs(q["bbox"][1]-box.y0))) if anchors else p
+        column = fitz.Rect(anchor["bbox"])
+        lane = "wide" if max(column.width, box.width) > width * .55 else "left" if (column.x0 + column.x1) / 2 < width / 2 else "right"
         lanes[p["page"], lane].append(p)
 
     records = []
@@ -76,6 +88,7 @@ def balance_columns(document, placements):
                 for item in items:
                     lines[item["line"]].append(item)
                 previous = None
+                previous_baseline = None
                 for line in sorted(lines):
                     current = lines[line]
                     y0 = min(item["bbox"][1] for item in current)
@@ -84,9 +97,21 @@ def balance_columns(document, placements):
                     heading = p["role"] in HEADING_BEFORE and previous is None
                     existing_before = 0
                     minimum_gap = None
+                    baseline = max(item["baseline"] for item in current)
                     if previous is not None:
                         gap = max(0, y0 - previous)
-                        allowance = max(size * .18, (y1 - y0 + gap) * .30) if p["role"] == "body" else 0
+                        preferred, maximum = (BODY_LEADING if p["role"] in {"body", "list"}
+                                              else CAPTION_LEADING if p["role"] == "caption" else (0, 0))
+                        if preferred:
+                            # Keep formula clearances from the measured layout;
+                            # only add whitespace when this region can afford it.
+                            offset = baseline - y0
+                            minimum = max(gap, preferred * size - (previous - previous_baseline) - offset)
+                            allowance = max(0, maximum * size - (previous - previous_baseline) - offset - minimum)
+                            minimum_gap = gap
+                            gap = minimum
+                        else:
+                            allowance = 0
                     elif p_index:
                         prior = region[p_index - 1]
                         if heading and prior["role"] not in HEADING_BEFORE:
@@ -96,8 +121,13 @@ def balance_columns(document, placements):
                             # Consecutive section/subsection headings form one
                             # group rather than two expandable paragraph gaps.
                             gap, allowance = size * .55, 0
+                        elif prior["role"] in HEADING_BEFORE:
+                            gap, allowance, minimum_gap = size * .65, size * .25, size * .30
+                        elif p.get("continuation") and p.get("flow_id") == prior.get("flow_id"):
+                            gap, allowance = 0, 0
                         else:
-                            gap, allowance = size * .30, size * .30 if p["role"] in {"body", "list"} else 0
+                            gap, allowance = size * .45, size * .15 if p["role"] in {"body", "list"} else 0
+                            minimum_gap = size * .30
                         if prior["role"] == "list" and p["role"] == "body":
                             gap = 0
                     else:
@@ -112,8 +142,10 @@ def balance_columns(document, placements):
                                 minimum_gap = 0
                     entries.append(dict(items=current, y0=y0, height=y1 - y0,
                                         gap=gap, allowance=allowance, heading=heading,
-                                        existing_before=existing_before, minimum_gap=minimum_gap))
+                                        existing_before=existing_before, minimum_gap=minimum_gap,
+                                        baseline_offset=baseline-y0, role=p["role"]))
                     previous = y1
+                    previous_baseline = baseline
             packed_height = sum(e["height"] + e["gap"] for e in entries)
             available = bottom - top
             if packed_height > available + .05:
@@ -126,6 +158,9 @@ def balance_columns(document, placements):
             if packed_height > available + .05:
                 # The existing layout still receives its normal geometry checks.
                 # Do not alter a dense region that cannot use bounded balancing.
+                records.append(dict(page=page+1,lane=lane,paragraphs=[p["id"] for p in region],
+                                    status="constrained", source_top=round(top,4),source_bottom=round(bottom,4),
+                                    packed_height=round(packed_height,4),available_height=round(available,4)))
                 continue
             spare = max(0, available - packed_height)
             heading_allowance = sum(e["allowance"] for e in entries if e["heading"])
@@ -135,7 +170,10 @@ def balance_columns(document, placements):
             ratio = min(1, max(0, spare - heading_added) / allowance) if allowance else 0
             cursor = top
             shifts = {}
+            baseline_steps = []
+            prior_entry = None
             heading_spacing = []
+            paragraph_gaps = []
             for entry in entries:
                 added = entry["allowance"] * (heading_ratio if entry["heading"] else ratio)
                 cursor += entry["gap"] + added
@@ -144,6 +182,13 @@ def balance_columns(document, placements):
                     heading_spacing.append(dict(paragraph=entry["items"][0]["paragraph"],
                                                 before_gap=round(before_gap, 4),
                                                 before_em=round(before_gap / entry["items"][0]["size"], 4)))
+                if prior_entry and entry["items"][0]["paragraph"] != prior_entry["items"][0]["paragraph"]:
+                    paragraph_gaps.append(dict(paragraph=entry["items"][0]["paragraph"],role=entry["role"],
+                                               gap_em=round((entry["gap"]+added)/entry["items"][0]["size"],4)))
+                if prior_entry and entry["items"][0]["paragraph"] == prior_entry["items"][0]["paragraph"]:
+                    baseline_steps.append(round((cursor + entry["baseline_offset"] - prior_entry["placed_baseline"])
+                                                / entry["items"][0]["size"], 4))
+                entry["placed_baseline"] = cursor + entry["baseline_offset"]
                 delta = cursor - entry["y0"]
                 for item in entry["items"]:
                     item["bbox"][1] += delta
@@ -151,10 +196,13 @@ def balance_columns(document, placements):
                     item["baseline"] += delta
                     shifts[item["paragraph"]] = round(delta, 4)
                 cursor += entry["height"]
+                prior_entry = entry
             records.append(dict(page=page + 1, lane=lane, paragraphs=[p["id"] for p in region],
+                                status="balanced",
                                 source_top=round(top, 4), source_bottom=round(bottom, 4),
                                 packed_height=round(packed_height, 4), distributed_height=round(heading_added + allowance * ratio, 4),
                                 remaining_tail=round(max(0, bottom - cursor), 4),
                                 line_gap_expansion=round(ratio, 4), heading_expansion=round(heading_ratio, 4),
-                                heading_spacing=heading_spacing, shifts=shifts))
+                                heading_spacing=heading_spacing, paragraph_gaps=paragraph_gaps,
+                                baseline_steps_em=baseline_steps, shifts=shifts))
     return records

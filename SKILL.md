@@ -1,65 +1,61 @@
 ---
 name: translate-layout-pdf
-description: Translate text-based academic and technical PDFs with Codex while preserving page size, columns, images, source formulas, tables, links, headers, and annotations as closely as possible. Use for layout-preserving or bilingual PDF translation and its visual review; scanned PDFs require OCR first.
+description: Translate text-based academic and technical PDFs with Codex while preserving page size, columns, vector formulas, images, tables and links. Use for readable layout-preserving or bilingual PDF translation; scanned PDFs require OCR first.
 license: AGPL-3.0-only
 ---
 
 # Translate Layout PDF
 
-Use the active Codex model for translation. Use `scripts/layout_pdf.py` only for deterministic extraction, contracts, typesetting, verification, and delivery. Resolve all paths relative to this skill directory, and keep each run in a new task-local job directory.
+Use the active model for translation and the bundled engine for extraction, layout, verification and delivery. Resolve scripts against this skill directory; put jobs and runtime dependencies in the task workspace. Never edit the source PDF.
 
-The v5 engine treats semantic text and page geometry separately. It stores inline mathematics as source-derived vector assets with baseline metrics, flows a paragraph through its source containers, and applies a two-em first-line indent plus a small, explicit leading increase to new Chinese/Japanese body paragraphs. Mixed formula/prose lines are decomposed so prose stays translatable, contained script or numeric fragments are absorbed into the formula asset, and same-flow prose split across an inline formula is rejoined into one semantic paragraph. Relative overlap checks ignore insignificant glyph-edge contact but keep genuinely ambiguous regions in the source language for review. The engine selects a bounded scale and real font face per style: body expansion is capped at 1.20×, title and heading expansion at 1.50×, and a small audited set of constrained body frames may fall back locally rather than shrinking the entire document. It rebalances a single CJK character on the final line within its paragraph. It preserves detected tables rather than translating their cells.
+## Readability and efficiency
+
+Use default `balanced` layout. Preserve pages, columns and fixed objects while allowing prose and headings to move together **within** a clear column region. Preserving layout does not require preserving every paragraph's original y coordinate. Use `--layout-mode source` only when the user explicitly prioritizes vertical correspondence; do not fall back to it to obtain a passing build.
+
+The engine composes same-page continuations before line breaking, infers the column of short headings from neighboring body text, and allocates spare height to heading gaps and measured baseline spacing. CJK body baselines prefer 1.50–1.80em; headings have a larger break before than after. These are bounded preferences, not permission to overlap fixed objects or stretch sparse pages. See [quality-and-repair.md](references/quality-and-repair.md).
+
+Use compact CLI summaries. Do not repeatedly print full document/layout JSON, successful formula check lists or complete translated batches into context. Full records remain on disk; use `--verbose` only for diagnosis.
 
 ## Run
 
-Use the default `balanced` layout for readable translations: paragraphs flow within source column regions bounded by fixed objects, and spare height is shared through bounded line/paragraph spacing. If the user prioritizes source vertical placement, pass `build --layout-mode source`. Do not stretch content to fill intentionally empty source areas or move content across fixed objects/pages just to hide whitespace.
+1. `python scripts/layout_pdf.py doctor`
 
-Reserve space before section headings by level before expanding body leading. Keep consecutive heading groups compact and adapt added spacing to the region's available height; see [references/quality-and-repair.md](references/quality-and-repair.md) for the bounded typography policy.
+   Requires Python 3.10+, `pymupdf>=1.26.5,<1.27`, Pillow, jsonschema and fontTools. Install missing packages in a workspace runtime, not global Python.
 
-Explicitly unchanged flows retain the original PDF text, typography, formulas, and links; they still receive source-ink checks. Text on opposite sides of a fixed display equation is laid out separately so proportional continuation splitting cannot move a citation or sentence ending across the equation. Source reconstruction preflight always re-typesets text rather than using unchanged-flow retention.
+2. `python scripts/layout_pdf.py prepare INPUT.pdf JOB --target-language zh-CN`
 
-1. Run `python scripts/layout_pdf.py doctor`. The runtime needs Python 3.10+, `pymupdf>=1.26.5,<1.27`, Pillow, jsonschema, and fontTools. If `doctor` fails because a package is missing, install only these dependencies in the active workspace runtime.
-2. Prepare the job:
+   Use the requested target language, otherwise the language of the request. Preparation refuses an existing job. Common multi-line titles and bullet continuations are normalized before allocating containers.
 
-   `python scripts/layout_pdf.py prepare INPUT.pdf JOB --target-language zh-CN`
+3. `python scripts/layout_pdf.py inspect JOB`
 
-   Use the language requested by the user; otherwise use the language of their request. Preparation refuses an existing job and never edits the source.
-3. Inspect `JOB/document.json` and `JOB/batches.json`. Confirm the reading order, paragraph roles, `flow_id` links, formula placement, preserved regions, and warnings before translating. Run a source-language reconstruction when inline formulas or multi-column flows exist:
+   Read the page/role/preservation map and grouped diagnostics. Inspect specific paragraphs with `inspect JOB --pages 3,4`; read `JOB/batches.json` in manageable chunks. Investigate concrete role, order or formula-boundary warnings before translating. Use `correct` for demonstrated semantic mistakes, not edits to sealed geometry/hashes.
 
-   `python scripts/layout_pdf.py build JOB --preflight`
+   Source reconstruction (`build JOB --preflight`) is a diagnostic tool for uncertain extraction or an unfamiliar producer, not an obligatory second full-document visual review. Formula/vector/source-preservation checks still run on every translated build. Inspect warned masks and representative complex formulas at detail scale; do not manually recheck every successfully verified asset on every build.
 
-   Inspect its rendered result using the same review process as a translation. Inspect every `parse/formula-vector-mask` region against the source strokes at 144 DPI: the mask may exclude a neighboring glyph only when its ink is disjoint from the formula. Correct a demonstrated role, continuation, or formula-placement error with `correct`; do not hand-edit geometry or hashes.
-4. Read [references/translation-contract.md](references/translation-contract.md). Translate every batch entry with Codex and write a UTF-8 JSON object from paragraph ID to translated string. Merge complete or partial batches atomically:
+4. Read [translation-contract.md](references/translation-contract.md). Translate each batch once into a UTF-8 ID-to-string JSON object, then `python scripts/layout_pdf.py merge JOB BATCH.json`. Reuse accepted translations when repairing layout; do not retranslate an entire paper for a local problem.
 
-   `python scripts/layout_pdf.py merge JOB BATCH.json`
-5. Validate and build:
+5. `python scripts/layout_pdf.py build JOB`
 
-   `python scripts/layout_pdf.py validate JOB --translated`
+   Build validates translations, compiles layout and performs PDF/raster checks. Invalid geometry stops before expensive artifact rendering. Read the compact failure summary and inspect only affected IDs/pages. A nonzero exit or `ok: false` is a failed candidate even when older PDF files exist. Do not weaken thresholds or shorten correct prose to conceal a parsing error.
 
-   `python scripts/layout_pdf.py build JOB`
+6. `python scripts/layout_pdf.py review JOB`
 
-   A nonzero exit or `ok: false` is a failed candidate even when PDF files exist. Fix only the reported cause, then rebuild.
-6. Generate current evidence:
+   Inspect all **mono 72-DPI contact sheets** for order, balance and gross defects, then reported **bilingual 144-DPI detail pages** for typography, mathematics, headings and alignment. The plan includes unsafe parsing and constrained regions, plus representative complex structures. Open additional pages if a sheet, warning or linguistic review raises concern. `review JOB --full` is available for an exhaustive audit.
 
-   `python scripts/layout_pdf.py review JOB`
-
-   Inspect every target-language page at 72 DPI, every contact sheet, and the 144-DPI pages containing formulas, dense text, tables, or unusual layouts. Inspect both target-language and bilingual PDFs. Then bind the decision to the evidence hash:
+   After a repair, `changed_pages` identifies pages differing from a previously passed pixel baseline. Reinspect changed pages and affected neighbors; avoid reopening unchanged pages or redundant sheets. Objective checks still run globally, and a new build always requires a new hash-bound review. Sampling cannot prove every translation correct; disclose retained source text and substantive limits.
 
    `python scripts/layout_pdf.py review JOB --status passed --notes "SPECIFIC OBSERVATIONS" --evidence-hash HASH`
 
-   Read [references/quality-and-repair.md](references/quality-and-repair.md) when any check or visual review fails.
-7. Deliver to a new user-facing directory:
+7. `python scripts/layout_pdf.py deliver JOB OUTPUT_DIR`
 
-   `python scripts/layout_pdf.py deliver JOB OUTPUT_DIR`
+   Atomic delivery requires current engine/document/layout/artifact hashes and a passed review. Confirm both PDFs open with expected pages. Retain failed jobs for recovery.
 
-   Delivery requires the current engine, document, layout, artifacts, and passed visual review to match their hashes. It creates `translated.pdf`, `bilingual.pdf`, receipts, and `complete.json` atomically. Confirm both PDFs open and have the expected pages before deleting the verified task-local job directory.
+## Content boundaries
 
-## Invariants
+- Preserve each `[[Mdddd]]` / `[[Pdddd]]` token byte-for-byte, in order, exactly once. One semantic paragraph per string, without manual line breaks.
+- Mathematics remains source vector art, including scripts, accents, fractions and baselines. Preserve detected table cells and complex illustration labels. Disclose retained prose and provide a separate translation when isolation is unsafe.
+- Selection is an independent artifact requirement: formula crops must physically remove off-clip text operators, not merely hide the source page behind a clip/CropBox. Legacy assets are cleaned in memory on rebuild. Keep global glyph-budget, off-page and bilingual-half checks enabled; normal `get_text()` and PNG review alone can miss hidden text. Generated paragraphs are painted in semantic reading order. See the selection checks in [quality-and-repair.md](references/quality-and-repair.md).
+- New CJK body paragraphs receive a two-em indent; continuations, headings, captions, lists and footnotes do not. Same-style headings use one size and a real bold face.
+- Classify parsing, translation, geometry, integrity and visual rhythm separately. Correct the cause, then rebuild. Stop after two unsuccessful fixes with the same failure fingerprint and report the concrete limitation.
 
-- Preserve each `[[Mdddd]]` and `[[Pdddd]]` token byte-for-byte, in the original order, exactly once. Keep every translation to one semantic paragraph without manual line breaks.
-- Leave source formulas as vectors. Never replace subscripts, superscripts, fraction bars, or symbols with flattened text. Latin symbol labels and consecutive inline assets stay together at wrap boundaries. An inline formula stays in its prose baseline; a display formula stays a display object.
-- New Chinese or Japanese body paragraphs receive a two-em indent. Headings, continuations, captions, footnotes, and lists do not. Keep headings concise; the engine keeps a shared size and real bold face for each heading style.
-- Treat diagnostics as evidence. Do not weaken validation thresholds, edit sealed geometry, or repeatedly shorten prose to conceal a parsing error.
-- Retain failed jobs for recovery. Stop after two correction/rebuild attempts with the same failure fingerprint and report the concrete limitation.
-
-For engine maintenance or backend work, read [references/architecture.md](references/architecture.md). The native v5 path targets ordinary text-based academic PDFs; scanned pages, irregular text encodings, complex vector illustrations, and undetected borderless tables may need OCR or a future backend adapter.
+For failures read [quality-and-repair.md](references/quality-and-repair.md); for engine maintenance read [architecture.md](references/architecture.md). Scanned pages or unsupported encodings may need OCR or a different backend.

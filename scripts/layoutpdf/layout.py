@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from functools import lru_cache
 from pathlib import Path
 
 import pymupdf as fitz
@@ -46,8 +47,18 @@ class Typesetter:
         self.preflight = preflight
         self.layout_mode = layout_mode
         self.fonts = {k: load_document_font(v) for k, v in document["fonts"].items()}
+        self.unit_cache = {}
+
+    @lru_cache(maxsize=32768)
+    def text_width(self, font_key, text, size):
+        return self.fonts[font_key].text_length(text, fontsize=size)
 
     def units(self, paragraph):
+        if "layout_units" in paragraph:
+            return paragraph["layout_units"]
+        key = (paragraph["id"], paragraph["translation"])
+        if key in self.unit_cache:
+            return self.unit_cache[key]
         text = paragraph["translation"]
         parts = TOKEN.split(text)
         tokens = TOKEN.findall(text)
@@ -97,7 +108,44 @@ class Typesetter:
             if (latin or inline) and self.doc["assets"][bound[j]["asset"]]["placement"] == "inline":
                 for member in bound[i:j]:
                     member["keep_with_next"] = True
+        self.unit_cache[key] = bound
         return bound
+
+    def flow_frames(self):
+        """Compose same-page continuations before fitting, without editing Source IR.
+
+        Proportional allocation remains useful across columns/pages. Within one
+        clear column it creates arbitrary mid-sentence breaks and blank islands.
+        """
+        if self.preflight or self.layout_mode != "balanced":
+            return self.doc["paragraphs"]
+        frames = []
+        for p in self.doc["paragraphs"]:
+            if frames:
+                prev = frames[-1]
+                a, b = fitz.Rect(prev["bbox"]), fitz.Rect(p["bbox"])
+                prior_bottom = max(r[3] for r in prev["erase"])
+                next_top = min(r[1] for r in p["erase"])
+                same = (p["role"] in {"body", "list"} and p["role"] == prev["role"]
+                        and p["style_id"] == prev["style_id"] and p["page"] == prev["page"]
+                        and p["flow_id"] == prev["flow_id"] and p["continuation"]
+                        and min(a.x1, b.x1) - max(a.x0, b.x0) > min(a.width, b.width) * .8
+                        and abs(a.x0-b.x0) < self.doc["styles"][p["style_id"]]["size"] * 2
+                        and next_top >= min(r[1] for r in prev["erase"]))
+                blockers = [r for r in self.doc["preserved"] if r["page"] == p["page"]
+                            and r["bbox"][1] >= prior_bottom - .1 and r["bbox"][3] <= next_top + .1
+                            and min(a.x1, b.x1, r["bbox"][2]) > max(a.x0, b.x0, r["bbox"][0])]
+                unchanged = (prev.get("translation") == prev["source"] or p.get("translation") == p["source"])
+                if same and not blockers and not unchanged:
+                    prev["layout_units"] = self.units(prev) + [dict(kind="text", text=" ")] + self.units(p)
+                    prev["source"] += " " + p["source"]
+                    prev["translation"] += " " + p["translation"]
+                    prev["bbox"] = list(a | b)
+                    prev["erase"] = prev["erase"] + p["erase"]
+                    prev["members"] = prev.get("members", [prev["id"]]) + [p["id"]]
+                    continue
+            frames.append(dict(p))
+        return frames
 
     def place(self, paragraph, factor=1.0, input_units=None, continuation=None):
         style = self.doc["styles"][paragraph["style_id"]]
@@ -132,7 +180,7 @@ class Typesetter:
                     lines.append(dict(units=[u], width=u["width"], indent=0, display=True))
                     continue
             else:
-                u.update(width=font.text_length(u["text"], fontsize=size),
+                u.update(width=self.text_width(font_key, u["text"], size),
                          ascent=font.ascender * size, descent=-font.descender * size)
             if not current and u["kind"] == "text" and u["text"] == " ":
                 continue
@@ -142,7 +190,7 @@ class Typesetter:
                 cursor += 1
                 following = units[cursor]
                 required_width += (self.doc["assets"][following["asset"]]["width"] * factor
-                                   if following["kind"] == "math" else font.text_length(following["text"], fontsize=size))
+                                   if following["kind"] == "math" else self.text_width(font_key, following["text"], size))
             if width + required_width > box.width + .01 and current and not current[-1].get("keep_with_next"):
                 # Move the preceding unit with closing punctuation, rather than starting a line with it.
                 if u["kind"] == "text" and u["text"] in CLOSING and len(current) > 1:
@@ -212,8 +260,10 @@ class Typesetter:
     def compile(self):
         # Style-wide scale search keeps all paragraphs of the same style consistent.
         chosen, diagnostics, placements = {}, [], []
+        paragraphs = self.flow_frames()
+        layout_document = dict(self.doc, paragraphs=paragraphs)
         groups = {}
-        for p in self.doc["paragraphs"]:
+        for p in paragraphs:
             groups.setdefault(p["flow_id"], []).append(p)
         segmented = {}
         for key, group in groups.items():
@@ -239,7 +289,7 @@ class Typesetter:
                     if not self.preflight and all(p["translation"] == p["source"] for p in group)
                     for p in group}
         groups = {key: group for key, group in groups.items() if group[0]["id"] not in retained}
-        retained_boxes = [(p["page"], p["id"], rect) for p in self.doc["paragraphs"]
+        retained_boxes = [(p["page"], p["id"], rect) for p in paragraphs
                           if p["id"] in retained for rect in p["erase"]]
         style_factors = {s: 1.0 for s in self.doc["styles"]}
         paragraph_scales = {}
@@ -273,7 +323,7 @@ class Typesetter:
                 by_paragraph.setdefault(item["paragraph"], []).append(item)
             previous = []
             fit = True
-            ordered = sorted((p for p in self.doc["paragraphs"] if p["style_id"] == sid),
+            ordered = sorted((p for p in paragraphs if p["style_id"] == sid),
                              key=lambda p: (p["page"], p["erase"][0][1], p["bbox"][0]))
             for p in ordered:
                 current = by_paragraph.get(p["id"], [])
@@ -291,7 +341,7 @@ class Typesetter:
                     blockers = [r for r in self.doc["preserved"] if r["page"] == p["page"]
                                 and r["bbox"][3] >= prior_bottom and r["bbox"][1] <= source_top
                                 and min(r["bbox"][2], p["bbox"][2]) > max(r["bbox"][0], p["bbox"][0])]
-                    semantic_blockers = [other for other in self.doc["paragraphs"]
+                    semantic_blockers = [other for other in paragraphs
                         if other["page"] == p["page"] and other["role"] != "body"
                         and min(r[1] for r in other["erase"]) >= prior_bottom - .1
                         and max(r[3] for r in other["erase"]) <= source_top + .1
@@ -379,7 +429,8 @@ class Typesetter:
             by_paragraph.setdefault(item["paragraph"], []).append(item)
         compacted = {}
         previous = []
-        for p in sorted(self.doc["paragraphs"], key=lambda p: (p["page"], p["erase"][0][1], p["bbox"][0])):
+        compaction_paragraphs = paragraphs if self.preflight or self.layout_mode == "source" else []
+        for p in sorted(compaction_paragraphs, key=lambda p: (p["page"], p["erase"][0][1], p["bbox"][0])):
             items = by_paragraph.get(p["id"], [])
             if not items:
                 continue
@@ -412,7 +463,7 @@ class Typesetter:
             previous.append(p)
         # Balance whole source column regions instead of leaving contraction
         # inside independently anchored paragraph boxes.
-        regions = (balance_columns(self.doc, placements) if not self.preflight and self.layout_mode == "balanced"
+        regions = (balance_columns(layout_document, placements) if not self.preflight and self.layout_mode == "balanced"
                    and self.doc["target_language"].startswith(("zh", "ja")) else [])
         # Validate actual geometry, not ink-density proxies.
         for item in placements:
@@ -445,12 +496,11 @@ class Typesetter:
                         break
                 active.append(item)
         # Font availability is checked against actual translated characters.
-        missing = set()
+        characters = defaultdict(set)
         for item in placements:
             if item["kind"] == "text":
-                for c in item["text"]:
-                    if not self.fonts[item["font"]].has_glyph(ord(c)):
-                        missing.add(c)
+                characters[item["font"]].update(item["text"])
+        missing = {c for key, chars in characters.items() for c in chars if not self.fonts[key].has_glyph(ord(c))}
         if missing:
             diagnostics.append(issue("font/missing-glyph", "fonts", {"characters": sorted(missing)}, stage="layout"))
         return dict(schema="layout-plan/v1", styles=style_factors, paragraph_scales=paragraph_scales,
@@ -458,5 +508,6 @@ class Typesetter:
                     cjk_body_leading=1.06 if not self.preflight and self.doc["target_language"].startswith(("zh", "ja")) else 1.0,
                     vertical_shifts=compacted,
                     column_regions=regions,
+                    composed_flows={p["id"]:p["members"] for p in paragraphs if "members" in p},
                     retained_paragraphs=sorted(retained),
                     placements=placements, diagnostics=diagnostics)

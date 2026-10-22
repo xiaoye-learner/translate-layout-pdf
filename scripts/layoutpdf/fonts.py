@@ -9,7 +9,8 @@ import pymupdf as fitz
 from fontTools.agl import toUnicode
 from fontTools.pens.boundsPen import BoundsPen
 from fontTools.t1Lib import T1Font
-from fontTools.ttLib import TTCollection
+from fontTools.ttLib import TTCollection, TTFont
+from fontTools.cffLib import CFFFontSet
 
 
 COLLECTION_REGIONS = {
@@ -79,6 +80,7 @@ def register_document_font(page, fontname, metadata):
     return page.insert_font(fontname=fontname, fontfile=metadata["path"])
 
 
+@lru_cache(maxsize=128)
 def type1_metrics(buffer):
     # PDF font streams may omit the standard eexec trailer present in PFA files.
     if b"cleartomark" not in buffer[-1024:]:
@@ -105,13 +107,40 @@ def type1_metrics(buffer):
         return metrics
 
 
+@lru_cache(maxsize=128)
+def cff_metrics(buffer):
+    cff = CFFFontSet()
+    cff.decompile(BytesIO(buffer), TTFont())
+    top = cff[cff.fontNames[0]]
+    matrix = top.FontMatrix
+    if matrix[1] or matrix[2] or matrix[4] or matrix[5]:
+        return {}
+    metrics = {}
+    for gid, name in enumerate(top.charset):
+        char = toUnicode(name)
+        glyph = top.CharStrings[name]
+        pen = BoundsPen(None)
+        glyph.draw(pen)
+        if pen.bounds and glyph.width:
+            x0, y0, x1, y1 = pen.bounds
+            metric = (fitz.Rect(x0 * matrix[0], y0 * matrix[3],
+                                x1 * matrix[0], y1 * matrix[3]), glyph.width * matrix[0])
+            metrics[("gid", gid)] = metric
+            if len(char) == 1:
+                metrics[char] = metric
+    return metrics
+
+
 def annotate_ink(document, page, raw):
     font_map = {}
+    trace_gids = {(span["font"].split("+")[-1], round(c[2][0], 3), round(c[2][1], 3)): c[1]
+                  for span in page.get_texttrace() for c in span["chars"]}
     for info in page.get_fonts(full=True):
         try:
             buffer = document.extract_font(info[0])[3]
             font = fitz.Font(fontbuffer=buffer) if buffer else fitz.Font(info[3])
-            metrics = type1_metrics(buffer) if buffer and info[1] == "pfa" else {}
+            metrics = (type1_metrics(buffer) if buffer and info[1] == "pfa" else
+                       cff_metrics(buffer) if buffer and info[1] == "cff" else {})
             font_map[info[3].split("+")[-1]] = (font, metrics)
         except Exception:
             # Unknown source encodings keep conservative PDF bounds; crop validation stays active.
@@ -127,7 +156,10 @@ def annotate_ink(document, page, raw):
                     c = char["c"]
                     if not c.strip():
                         continue
-                    if c in metrics:
+                    gid = trace_gids.get((span["font"], round(char["origin"][0], 3), round(char["origin"][1], 3)))
+                    if ("gid", gid) in metrics:
+                        glyph, advance = metrics[("gid", gid)]
+                    elif c in metrics:
                         glyph, advance = metrics[c]
                     elif font.has_glyph(ord(c)):
                         glyph, advance = font.glyph_bbox(ord(c)), font.glyph_advance(ord(c))

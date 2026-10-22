@@ -10,9 +10,10 @@ import pymupdf as fitz
 
 from .contracts import Failure, digest, issue, seal, write
 from .fonts import annotate_ink, collection_face, load_document_font
+from .selection import materialize_clip
 
 MATH_FONT = re.compile(r"CMMI|CMSY|CMEX|MSAM|MSBM|math|symbol|STIX.*(?:Italic|Symbols)", re.I)
-MATH_SYMBOLS = set("=+−×÷±≤≥≠≈∑∫√∂∇∞∈∉⊂⊆∪∩→↦∀∃∏∝⊗⊕′″ˆ")
+MATH_SYMBOLS = set("=+−×÷±≤≥≠≈∑∫√∂∇∞∈∉⊂⊆∪∩→↦∀∃∏∝⊗⊕′″ˆ∆˜ΘΣΦ")
 ROMAN_MATH_OPERATORS = ("argmin", "argmax", "min", "max", "sin", "cos", "tan", "log", "exp")
 PROTECT = re.compile(r"https?://\S+|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}|\b10\.\d{4,9}/\S+|\[(?:\d+[ ,;–-]*)+\]")
 HEADING = re.compile(r"^(?P<num>\d+(?:\.\d+)*\.?|[IVX]+\.|[A-Z](?:\.\d+)*\.)\s+\S")
@@ -101,7 +102,15 @@ def visual_lines(block):
         for group in reversed(groups):
             a, b = fitz.Rect(group["bbox"]), fitz.Rect(line["bbox"])
             overlap = max(0, min(a.y1, b.y1) - max(a.y0, b.y0))
-            if overlap / max(1, min(a.height, b.height)) > .42:
+            def prose_baseline(item):
+                letters = [g for g in item["glyphs"] if g["text"].isalpha() and not MATH_FONT.search(g["font"])]
+                dominant = Counter(round(g["y"], 1) for g in letters).most_common(1)
+                # An isolated italic denominator or superscript is not another
+                # prose line. Only compare baselines with actual word evidence.
+                return dominant[0][0] if dominant and dominant[0][1] >= 3 else None
+            ab, bb = prose_baseline(group), prose_baseline(line)
+            distinct_prose_lines = ab is not None and bb is not None and abs(ab - bb) > max(g["size"] for g in line["glyphs"]) * .45
+            if not distinct_prose_lines and overlap / max(1, min(a.height, b.height)) > .42:
                 chosen = group
                 break
         if chosen is None:
@@ -333,6 +342,11 @@ def make_asset(doc, page_index, group, baseline, placement, assets, job, page_gl
                                  ["compare masked formula strokes with the source at 144 DPI"],
                                  severity="warning", stage="prepare"))
     file = f"assets/{asset_id}.pdf"
+    # PDF clipping alone imports every text operator of the source page.
+    # Remove off-clip operators so readers cannot select invisible prose.
+    cleaned=materialize_clip(target)
+    if cleaned["raster_difference"] > .01:
+        raise Failure([issue("selection/clip-changed-ink",asset_id,cleaned,stage="prepare")])
     out.save(job / file, garbage=4, deflate=True, no_new_id=True)
     out.close()
     # A superscript's reference baseline can be below its ink: signed descent preserves that offset.
@@ -368,6 +382,9 @@ def absorb_split_formula_fragments(doc, document, job, raw_pages):
         out = fitz.open()
         target = out.new_page(width=bbox.width, height=bbox.height)
         target.show_pdf_page(target.rect, doc, asset["page"], clip=bbox)
+        cleaned=materialize_clip(target)
+        if cleaned["raster_difference"] > .01:
+            raise Failure([issue("selection/clip-changed-ink",asset_id,cleaned,stage="prepare")])
         path = job / asset["file"]
         out.save(path, garbage=4, deflate=True, no_new_id=True)
         out.close()
@@ -423,6 +440,13 @@ def prepare(source, job, target_language="zh-CN", regular=None, bold=None):
             for r in mixed:
                 if r[1] <= page.rect.height * .06 or r[3] - r[1] <= body_size * 2.5:
                     continue
+                # Text/line detection can join title rules and a footnote rule into
+                # a page-wide false table. Benchmark data tables contain numeric
+                # cells; prose and vector illustrations do not supply that evidence.
+                candidate_text = page.get_textbox(fitz.Rect(r))
+                visible = [c for c in candidate_text if not c.isspace()]
+                if not visible or sum(c.isdigit() for c in visible) / len(visible) < .12:
+                    continue
                 if r[0] < page.rect.width / 2 and r[2] < page.rect.width / 2:
                     r[2] = page.rect.width / 2 - 12
                 candidates.append(r)
@@ -436,6 +460,26 @@ def prepare(source, job, target_language="zh-CN", regular=None, bold=None):
         except Exception:
             # Table discovery is advisory; unsupported producers still retain their vector art.
             pass
+        # Captioned academic tables and algorithm boxes use aligned top/header/
+        # bottom rules. Recover each box separately so detector candidates cannot
+        # bridge a figure or a second caption between independent tabular objects.
+        rule_groups = {}
+        for drawing in page.get_drawings():
+            r = fitz.Rect(drawing["rect"])
+            if r.width > page.rect.width * .2 and r.height < .5:
+                rule_groups.setdefault((round(r.x0, 1), round(r.x1, 1)), []).append(r.y0)
+        bounded_tables = []
+        for (left, right), ys in rule_groups.items():
+            ys = sorted(set(round(y, 3) for y in ys))
+            if len(ys) == 3:
+                nearby = page.get_textbox(fitz.Rect(0, max(0, ys[0] - 35), page.rect.width, ys[0] + 14))
+                if re.search(r"(?:Table|Algorithm)\s+\d", nearby):
+                    bounded_tables.append([left - .3, ys[0] - .3, right + .3, ys[-1] + .3])
+        if bounded_tables:
+            # Replace detector boxes that bridge the bounded objects, while
+            # retaining independent tables elsewhere on the same page.
+            table_regions = bounded_tables + [r for r in table_regions
+                if not any(not (fitz.Rect(r) & fitz.Rect(b)).is_empty for b in bounded_tables)]
         figure_regions = []
         for candidate in blocks:
             candidate_glyphs = glyphs(candidate)
@@ -545,7 +589,7 @@ def prepare(source, job, target_language="zh-CN", regular=None, bold=None):
                 elif len(group_lines) <= 3 and (size > body_size * 1.15 or (bold_fraction > .75 and len(ptext) < 100)):
                     role = ("subheading" if (numbered and numbered["num"].rstrip(".").count("."))
                             or size <= body_size * 1.05 else "heading")
-                elif re.match(r"^(?:Figure|Fig\.?|Table)\s*\d", ptext, re.I):
+                elif re.match(r"^(?:Figure|Fig\.?|Table)\s*\d+\s*[:.\u2013\u2014]", ptext, re.I):
                     role = "caption"
                 elif re.match(r"^[•▪‣]", ptext):
                     role = "list"
@@ -616,6 +660,7 @@ def prepare(source, job, target_language="zh-CN", regular=None, bold=None):
                     source=source_text, translation=None, tokens=tokens, continuation=False, flow_id=pid))
                 document["coverage"]["translated_characters"] += len(group_gs)
     absorb_split_formula_fragments(pdf, document, job, raw_pages)
+    normalize_semantics(document, body_size)
     # Room is a container constraint, not the ink's tight bounding box. Expand only into clear space.
     paragraphs = document["paragraphs"]
     for p in paragraphs:
@@ -702,3 +747,35 @@ def prepare(source, job, target_language="zh-CN", regular=None, bold=None):
                                      translation=None) for p in paragraphs])
     pdf.close()
     return document
+
+
+def normalize_semantics(document, body_size):
+    """Recover common PDF block splits before allocating text containers."""
+    paragraphs = document["paragraphs"]
+    for prev, p in zip(paragraphs, paragraphs[1:]):
+        if p["page"] != prev["page"]:
+            continue
+        a, b = fitz.Rect(rect_union(prev["erase"])), fitz.Rect(rect_union(p["erase"]))
+        gap = b.y0-a.y1
+        ps, qs = document["styles"][prev["style_id"]], document["styles"][p["style_id"]]
+        same_size = abs(ps["size"]-qs["size"]) < .3
+        page_width = document["pages"][p["page"]]["width"]
+        if (p["page"] == 0 and prev["role"] == "title" and p["role"] in {"body", "heading", "title"}
+                and same_size and -.5 < gap < body_size*1.5
+                and abs((b.x0+b.x1)/2-page_width/2) < page_width*.1):
+            p["role"], p["style_id"] = "title", prev["style_id"]
+            continue
+        unfinished = not re.search(r"[.!?:\u3002\uff01\uff1f\uff1a][\]\)\"']?$", prev["source"])
+        blocked = any(r["page"] == p["page"] and r["bbox"][1] >= a.y1-.1 and r["bbox"][3] <= b.y0+.1
+                      and min(a.x1, b.x1, r["bbox"][2]) > max(a.x0, b.x0, r["bbox"][0])
+                      for r in document["preserved"])
+        if not same_size or not unfinished or blocked or not -.5 < gap < body_size*1.5:
+            continue
+        if (prev["role"] == "list" and p["role"] == "body"
+                and 0 <= b.x0-a.x0 < body_size*3 and b.x1 > a.x0+body_size*8):
+            p["role"], p["style_id"] = "list", prev["style_id"]
+            p["continuation"], p["flow_id"] = True, prev["flow_id"]
+        elif (prev["role"] == p["role"] == "body" and abs(b.x0-a.x0) < body_size*.8
+              and min(a.x1,b.x1)-max(a.x0,b.x0) > min(a.width,b.width)*.8
+              and re.match(r"^(?:[a-z]|\[\[M\d)", p["source"])):
+            p["continuation"], p["flow_id"] = True, prev["flow_id"]

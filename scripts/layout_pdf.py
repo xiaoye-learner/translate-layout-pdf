@@ -9,11 +9,13 @@ from layoutpdf import VERSION
 from layoutpdf.contracts import Failure, issue, require, validate
 from layoutpdf.extract import font_pair, prepare
 from layoutpdf.pipeline import build, correct, deliver, load_job, merge, review
+from layoutpdf.inspection import compact_result, inspect_document
 
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--version", action="version", version=VERSION)
+    p.add_argument("--verbose", action="store_true", help="Print complete records instead of compact summaries")
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("doctor")
     prep = sub.add_parser("prepare")
@@ -22,9 +24,11 @@ def parser():
     prep.add_argument("--target-language", default="zh-CN")
     prep.add_argument("--font")
     prep.add_argument("--bold-font")
-    for name in ("validate", "merge", "correct", "build", "review", "deliver"):
+    for name in ("inspect", "validate", "merge", "correct", "build", "review", "deliver"):
         command = sub.add_parser(name)
         command.add_argument("job")
+        if name == "inspect":
+            command.add_argument("--pages", help="Comma-separated one-based pages; includes their paragraph text")
         if name in {"merge", "correct"}:
             command.add_argument("batch")
         if name == "validate":
@@ -33,6 +37,7 @@ def parser():
             command.add_argument("--preflight", action="store_true")
             command.add_argument("--layout-mode", choices=["balanced", "source"], default="balanced")
         if name == "review":
+            command.add_argument("--full", action="store_true", help="Render every page in both PDFs at both resolutions")
             command.add_argument("--status", choices=["passed", "failed"])
             command.add_argument("--notes")
             command.add_argument("--evidence-hash")
@@ -52,6 +57,10 @@ def main():
             require(validate(doc, job=Path(args.job)))
             require(doc["diagnostics"])
             result = dict(job=str(Path(args.job).resolve()), paragraphs=len(doc["paragraphs"]), formulas=len(doc["assets"]), diagnostics=doc["diagnostics"])
+        elif args.command == "inspect":
+            _, doc = load_job(args.job)
+            pages = [int(x) for x in args.pages.split(",")] if args.pages else None
+            result = inspect_document(doc, pages)
         elif args.command == "validate":
             _, doc = load_job(args.job, args.translated)
             require(doc["diagnostics"])
@@ -61,14 +70,15 @@ def main():
         elif args.command == "build":
             result = build(args.job, args.preflight, args.layout_mode)
         elif args.command == "review":
-            result = review(args.job, args.status, args.notes, args.evidence_hash)
+            result = review(args.job, args.status, args.notes, args.evidence_hash, args.full)
         else:
             result = deliver(args.job, args.output)
         result = dict(command=args.command, ok=True) | result
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(result if args.verbose else compact_result(result), ensure_ascii=False, indent=2))
         return 0 if result["ok"] else 1
     except Failure as exc:
-        print(json.dumps(dict(ok=False, command=args.command, diagnostics=exc.diagnostics), ensure_ascii=False, indent=2))
+        failure = dict(ok=False, command=args.command, diagnostics=exc.diagnostics)
+        print(json.dumps(failure if args.verbose else compact_result(failure), ensure_ascii=False, indent=2))
         return 1
     except Exception as exc:
         print(json.dumps(dict(ok=False, command=args.command, diagnostics=[issue("runtime/error", args.command,

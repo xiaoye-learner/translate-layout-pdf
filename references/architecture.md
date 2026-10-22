@@ -28,10 +28,12 @@ atomic output directory
 
 - `contracts.py`: JSON Schema validation, structure sealing, asset/source/font hashes, token order, coverage and flow checks, atomic JSON writes, typed diagnostics.
 - `extract.py`: two-dimensional glyph analysis, paragraph and column flow inference, mixed formula/prose decomposition, containment-based formula-fragment absorption, same-flow semantic-fragment merging, conservative preservation, math-token creation, style inference.
-- `fonts.py`: actual glyph ink bounds, including embedded Type 1 outline handling. This prevents nominal PDF font boxes from treating empty descender space as formula overlap.
+- `fonts.py`: actual glyph ink bounds, including cached Type 1/CFF outlines and source trace glyph IDs for subset fonts. This prevents nominal PDF font boxes from treating empty descender space as formula overlap.
 - `layout.py`: measured token layout, baseline-aware vector math placement, two-em paragraph indentation, shared style scaling, source-container flow, punctuation constraints, fixed-display semantic boundaries, unchanged-flow retention, and relative-overlap collision checks with a per-page vertical sweep.
-- `balance.py`: source-column regions bounded by fixed objects; semantic paragraph packing and bounded redistribution of spare height, prioritizing heading-before spacing by level while keeping consecutive headings together. `column_regions` records distributed height, measured heading spacing, and remaining tail. `source` layout mode bypasses this stage.
-- `pipeline.py`: atomic batch merge, bounded corrections, reconstruction, formula/preserved/unchanged-region image comparison, source retention with original links, bilingual composition, rendered evidence, hash-bound review, atomic delivery.
+- `balance.py`: inherited source-column regions (including short headings/captions) bounded by fixed objects; semantic paragraph packing and bounded redistribution of spare height, prioritizing heading-before spacing by level while keeping consecutive headings together. `column_regions` records distributed height, measured baseline/paragraph/heading spacing, constrained regions and remaining tail. `source` layout mode bypasses this stage.
+- `inspection.py`: compact grouped diagnostics, page maps and bounded risk/diversity plans for visual detail.
+- `selection.py`: physical removal of off-clip text, before/after stroke checks, hidden glyph budgets and bilingual side isolation. Formula asset generation and legacy-job rebuilds both use this path.
+- `pipeline.py`: fail-fast geometry, focused/full review and pixel-based changed-page reports; atomic batch merge, bounded corrections, reconstruction, formula/preserved/unchanged-region image comparison, source retention with original links, bilingual composition, rendered evidence, hash-bound review, atomic delivery.
 
 ## Data boundaries
 

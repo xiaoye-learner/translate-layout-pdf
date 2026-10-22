@@ -194,7 +194,7 @@ class PipelineTests(unittest.TestCase):
         requested = size * self.doc["styles"][p["style_id"]]["leading"] * 1.06
         expected = max(size * (font.ascender - font.descender), requested)
         self.assertGreaterEqual(baselines[1] - baselines[0], expected - .02)
-        self.assertLessEqual(baselines[1] - baselines[0], expected * 1.30 + .02)
+        self.assertLessEqual(baselines[1] - baselines[0], max(expected, size * 1.80) + .02)
         self.assertEqual(self.plan["cjk_body_leading"], 1.06)
 
     def test_column_balance_closes_internal_hole_and_respects_fixed_object(self):
