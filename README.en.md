@@ -19,10 +19,6 @@ The English source is on the left; the current engine's Chinese output is on the
 - **Less repeated review:** compact CLI diagnostics and page-specific `inspect --pages`. Review covers all-page overviews and risk-selected detail, with changed-page reports after repairs; `review --full` enables exhaustive high-resolution inspection.
 - **Two outputs:** produces `translated.pdf` and side-by-side `bilingual.pdf`. Prose can redistribute space between fixed objects; use `build --layout-mode source` only for an explicit preference for vertical correspondence.
 
-## Search and selection example
-
-![Actual translated heading and body spacing, plus the PDF search bounds for the Chinese short-paragraph phrase](docs/assets/synthetic-details.png)
-
 ## Pipeline
 
 ```mermaid

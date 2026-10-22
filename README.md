@@ -19,10 +19,6 @@
 - **减少重复复核**：CLI 默认只汇总诊断；`inspect --pages` 展开指定页。默认查看全篇总览和风险页，修复后报告变化页；需要逐页高清检查时使用 `review --full`。
 - **两种输出**：生成中文单语版 `translated.pdf` 与左右对照版 `bilingual.pdf`。正文可在固定对象之间重新分配空间；仅在明确需要纵向对应时使用 `build --layout-mode source`。
 
-## 搜索与选区示例
-
-![实际译页中的标题与正文行距，以及短段落的 PDF 搜索命中范围](docs/assets/synthetic-details.png)
-
 ## 工作流程
 
 ```mermaid
